@@ -225,4 +225,4 @@ requirements*.txt           python deps
 
 ## license / spirit
 
-personal hack, take it and do whatever. PRs welcome but i make no promises about keeping this tidy.
+[MIT](LICENSE) — personal hack, take it and do whatever. PRs welcome but i make no promises about keeping this tidy.
