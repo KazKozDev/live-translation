@@ -53,6 +53,40 @@ def language_label(code):
     return code or "Auto"
 
 
+def prompt_language(code, auto_label="auto-detected speech"):
+    code = (code or "").lower()
+    if code == "auto":
+        return auto_label
+    name = language_name(code)
+    return f"{name} ({code})" if code else auto_label
+
+
+def live_translation_messages(src_code, tgt_code, text):
+    target = language_name(tgt_code)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a low-latency live speech translation engine. "
+                f"Translate the new transcript into {target}. "
+                "Return only the translation. Do not explain. Do not summarize. "
+                "Do not add commentary. Preserve names, numbers, places, dates, "
+                "product names, and technical terms. Fix obvious speech-recognition "
+                "errors only when the intended meaning is clear. If the transcript is "
+                "incomplete, translate only what is present."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Source language: {prompt_language(src_code)}\n"
+                f"Target language: {prompt_language(tgt_code, 'the target language')}\n\n"
+                f"New transcript:\n{text}"
+            ),
+        },
+    ]
+
+
 _TG_EXTRA_NAMES = {
     "ca": "Catalan",
     "ja": "Japanese",

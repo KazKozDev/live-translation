@@ -16,10 +16,10 @@ It's a hack. It works surprisingly well. Read on.
 
 ```
 system audio ──► whisper (speech→text) ──► local LLM (translate) ──► glass overlay
-   (BlackHole)        (mlx, large-v3)         (mlx, Qwen3.5-9B)         (pyobjc)
+   (BlackHole)        (mlx, small/medium/large) (Ollama Gemma 4)        (pyobjc)
 ```
 
-Everything is local: [MLX](https://github.com/ml-explore/mlx) Whisper for transcription, a local LLM (MLX Qwen by default) for translation, Silero VAD to throw away silence. The UI is a translucent always-on-top window drawn with pyobjc.
+Everything is local: [MLX](https://github.com/ml-explore/mlx) Whisper for transcription, Ollama Gemma 4 for translation, Silero VAD to throw away silence. The UI is a translucent always-on-top window drawn with pyobjc.
 
 ## Who's this for
 
@@ -81,19 +81,24 @@ Now you hear everything normally, and the app hears it too. (If you don't care a
 
 ### 3. The models
 
-Three models get downloaded the first time (or up front by `setup.sh`):
+Models get downloaded the first time (or up front by `setup.sh`):
 
-- **Whisper large-v3** (transcription) and **Qwen3.5-9B** (translation) — both MLX, pulled automatically from Hugging Face on first run. No API keys, no accounts.
+- **Whisper medium** (transcription) — MLX, pulled automatically from Hugging Face on first run. No API keys, no accounts.
+- **Gemma 4 via Ollama** (translation) — choose `gemma4:26b-mlx`, `gemma4:e4b-mlx`, or `gemma4:12b-mlx` from the in-app settings.
 - **Silero VAD** ships inside the `silero-vad` pip package — nothing to download.
 
 To grab them ahead of time instead of on first launch:
 
 ```bash
 ./.venv/bin/python -c "from huggingface_hub import snapshot_download; \
-[snapshot_download(r) for r in ('mlx-community/whisper-large-v3-mlx','mlx-community/Qwen3.5-9B-MLX-4bit')]"
+[snapshot_download(r) for r in ('mlx-community/whisper-medium-mlx',)]"
 ```
 
-(Optional) if you want the translategemma backend instead of Qwen: `ollama pull translategemma:12b`.
+For translation models:
+
+```bash
+for model in gemma4:26b-mlx gemma4:e4b-mlx gemma4:12b-mlx; do ollama pull "$model"; done
+```
 
 ### 4. Run
 
@@ -111,7 +116,7 @@ Two ways — pick whichever you like, they open the exact same overlay.
 
 ```bash
 ./.venv/bin/python live_translate_overlay.py \
-    --legacy-chunking --mlx-llm mlx-community/Qwen3.5-9B-MLX-4bit --target ru
+    --legacy-chunking --whisper medium --ollama-model gemma4:26b-mlx --target ru
 ```
 
 See [knobs](#knobs) below or `--help` for the full list.
@@ -151,9 +156,9 @@ The window itself is draggable (grab anywhere) and resizable from the edges; con
 
 The naive version of this — chop audio into fixed 5s chunks, transcribe each one independently — is bad. Whisper sticks a period at the end of every chunk, cuts words in half at boundaries, and repeats itself. Most of the interesting work is in *not* doing that.
 
-- **Segmentation that doesn't lose anything (the default).** Audio is cut into chunks *at natural pauses* (found with VAD), not at fixed sizes, so words don't get sliced in half. Each chunk is transcribed exactly once, with overlap between chunks; an overlap-dedup merges the seams, a sentence assembler regroups text on real punctuation, and a spurious-period stripper removes the period Whisper adds at a chunk end when the speaker only paused for breath. The hard rule here is **no dropped audio**: the queues block instead of dropping, so if transcription falls behind for a moment it catches up rather than throwing speech away. The overlay shows finalized transcript/translation pairs by default, not a chopped live tail; I'd rather be a second late than show half a thought.
+- **Segmentation that doesn't lose anything in normal load (the default).** Audio is cut into chunks *at natural pauses* (found with VAD), not at fixed sizes, so words don't get sliced in half. Each chunk is transcribed exactly once, with overlap between chunks; an overlap-dedup merges the seams, a sentence assembler regroups text on real punctuation, and a spurious-period stripper removes the period Whisper adds at a chunk end when the speaker only paused for breath. The hard rule here is **don't get stuck**: under normal load the pipeline catches up instead of throwing speech away; under severe overload it skips stale raw audio and jumps back to live rather than letting translation stop forever. The overlay shows finalized transcript/translation pairs by default, not a chopped live tail; I'd rather miss an overloaded moment than wedge the whole session.
 
-- **A smoother (but lossy) streaming mode, off by default.** There's also a LocalAgreement-2 mode (`whisper-streaming` / WhisperLiveKit style): keep a rolling buffer, re-transcribe it every ~1.5s, and only *commit* a word once two consecutive passes agree on it. It can show the unconfirmed tail as a dim live draft with `--show-partial`, but the default UI waits for finalized blocks. Streaming reads beautifully — text flows and self-corrects instead of appearing in blocks. But re-transcribing the same audio repeatedly is expensive, and to keep up with large-v3 it has to either drop audio or trim its buffer — i.e. **lose pieces**. Since I can't afford that, it's behind a flag; the default is the lossless chunker above. (It's the right call if you pair it with a faster model.)
+- **A smoother (but lossy) streaming mode, off by default.** There's also a LocalAgreement-2 mode (`whisper-streaming` / WhisperLiveKit style): keep a rolling buffer, re-transcribe it every ~1.5s, and only *commit* a word once two consecutive passes agree on it. It can show the unconfirmed tail as a dim live draft with `--show-partial`, but the default UI waits for finalized blocks. Streaming reads beautifully — text flows and self-corrects instead of appearing in blocks. But re-transcribing the same audio repeatedly is expensive, and with heavier models it has to either drop audio or trim its buffer — i.e. **lose pieces**. Since I can't afford that, it's behind a flag; the default is the lossless chunker above. (It's the right call if you pair it with a faster model.)
 
 - **Surviving Whisper's punctuation drift.** On fast, pause-less speech Whisper sometimes stops emitting punctuation for a stretch — and because the recently finalized text is fed back as its `initial_prompt`, a punctuation-less run *reinforces itself* and the overlay collapses into one giant paragraph, then snaps back later. Two guards: (1) the prompt feedback is dropped whenever that recent context has no sentence punctuation, so the next chunk can re-introduce sentence boundaries instead of inheriting the drift; (2) when a block still arrives with no punctuation at all, it's split into readable paragraphs at clause boundaries (commas/dashes) or, failing that, at word boundaries near a target length — never one wall, never mid-word.
 
@@ -167,14 +172,9 @@ The naive version of this — chop audio into fixed 5s chunks, transcribe each o
 
 ## The models
 
-**Transcription: Whisper large-v3, on MLX.** Two separate choices here. `large-v3` because it's the most accurate Whisper size — for live foreign-language audio with names, places and accents you want every bit of accuracy you can get, and the cheaper models start dropping words. And **[MLX](https://github.com/ml-explore/mlx) because it's the fastest way to run Whisper on a Mac** — it's Apple's own array framework, runs on the GPU through Metal with unified memory (no copying audio tensors back and forth), and on Apple silicon it beats the CPU-bound options (faster-whisper, whisper.cpp) for this workload. That combination — heaviest model at usable speed — is the *only* reason real-time large-v3 is even feasible on a laptop. On a smaller Mac you can still drop to `--whisper medium` for more headroom.
+**Transcription: Whisper on MLX.** Pick `small`, `medium`, or `large` in settings. `medium` is the current default because it gives the live pipeline more headroom on a laptop while staying much stronger than the tiny models. And **[MLX](https://github.com/ml-explore/mlx) because it's the fastest way to run Whisper on a Mac** — it's Apple's own array framework, runs on the GPU through Metal with unified memory (no copying audio tensors back and forth), and on Apple silicon it beats the CPU-bound options (faster-whisper, whisper.cpp) for this workload.
 
-**Translation** defaults to **Qwen3.5-9B** (4-bit MLX, on-device). I also wired up **translategemma:12b** (a translation-tuned Gemma, via ollama) and did a little bake-off on real news clips:
-
-- **translategemma**: more fluent, better with idioms and world knowledge ("los Mossos" → "catalan police"). But sometimes *adds* stuff that wasn't said, and ~1.5x slower.
-- **Qwen3.5-9B**: faster, more literal/faithful, occasionally clumsy word choice.
-
-For live news I kept Qwen — accuracy + latency win over polish. But it's one line in the launcher to switch (`--translator ollama --ollama-model translategemma:12b`). Your mileage will vary by language pair; try both with your ears.
+**Translation** uses **Gemma 4 via Ollama**. The app exposes three choices in settings: `gemma4:26b-mlx`, `gemma4:e4b-mlx`, and `gemma4:12b-mlx`.
 
 ## Knobs
 
@@ -183,11 +183,11 @@ It's a CLI under the hood, so everything is tunable. Some you'll actually touch:
 ```
 --legacy-chunking          the lossless chunk pipeline (DEFAULT in the .app launcher)
 --source / --target        languages (or pick in the UI). source=auto detects per-utterance
---whisper large-v3         transcription model (small/medium are faster, worse)
---mlx-llm REPO             translation model (any MLX-LM repo)
---translator ollama        use ollama instead of MLX (e.g. for translategemma)
+--whisper medium           MLX Whisper size: small, medium, or large
+--ollama-model MODEL       Gemma 4 Ollama model
 --silence-rms 0.006        louder = stricter silence gate
 --vad-min-speech-ms 250    min real speech per window before whisper sees it
+--audio-queue 120          raw audio backlog before old audio is skipped to recover
 --show-partial             also show the unfinalized live draft (off by default)
 # streaming mode (omit --legacy-chunking): smoother, but lossy under load
 --update-seconds 1.5       how often to re-transcribe the rolling buffer (lower = snappier, heavier)
@@ -200,7 +200,7 @@ It's a CLI under the hood, so everything is tunable. Some you'll actually touch:
 The "interesting" 20% above is the fun part. The other 80% was making it not fall over, which is never in the demo but is the whole difference between a toy and something you leave running for an hour. A sampler:
 
 - **The audio thread silently dying.** Switch YouTube videos, CoreAudio re-inits the route, the input callback goes quiet forever, and transcription just... stops, with no error. Now there's a watchdog that notices the silence and reopens the stream.
-- **The live-vs-complete tradeoff.** My first instinct when Whisper fell behind was to drop the oldest audio and stay *live* — great for a clock, terrible when you actually care about every word. So the default flipped the other way: the queues block, nothing gets dropped, and if it falls behind it just runs a second or two late and catches up. "don't lose pieces" won over "always be live."
+- **The live-vs-complete tradeoff.** My first instinct when Whisper fell behind was to drop the oldest audio and stay *live* — great for a clock, terrible when you actually care about every word. So the normal path runs a little late and catches up instead of dropping speech. But a totally unbounded backlog can wedge a live session, so the raw audio queue now has a recovery cap: if the machine falls badly behind, it skips stale audio and resumes near live.
 - **The Clear button only clearing the screen.** Turns out "clear" needs to wipe the rolling audio buffer, both worker threads' state, the pending queues, *and* discard the chunk that's mid-flight inside Whisper at that exact moment. Otherwise old text keeps dribbling in after you hit clear. All of that now resets from one generation counter.
 - **Workers dying on a single bad frame.** One unguarded exception in the audio loop and the whole pipeline goes dark with nothing in the log. Everything is wrapped now and logs `[chunk]`/`[audio]`/`[stream]`/`[ui]` so the next stall names itself.
 - **Shipping it as a double-clickable app.** This ate an afternoon. macOS LaunchServices will *not* run a `.app` whose executable is a shell script — it just silently does nothing. So the bundle's executable is a tiny compiled C launcher that execs the real script, the whole thing is ad-hoc codesigned (`codesign -s -`), and only then does double-click work. Also it kept vanishing from the Dock until I set the activation policy to `Regular`.
@@ -211,7 +211,7 @@ None of this is clever. All of it was necessary.
 
 - macOS + Apple silicon only. The overlay is pyobjc/Cocoa, the inference is MLX.
 - You have to route audio through BlackHole yourself. macOS makes capturing system audio annoying on purpose.
-- large-v3 is not free. The default lossless chunker keeps up on an M-series Mac; if it ever can't, it stays correct but the subtitles drift a second or two behind (it won't drop words). On a smaller Mac use `--whisper medium`. The streaming mode is heavier still.
+- Whisper is not free. The default medium chunker keeps up on an M-series Mac; if it ever can't, it stays correct for a while, then skips stale raw audio rather than letting the subtitles drift forever. Use `--whisper large` when accuracy matters more than headroom. The streaming mode is heavier still.
 - Auto language detection wobbles on mixed-language audio (Spanish news with Catalan inserts will flip-flop). Pin `--source` if you know it.
 - It still hallucinates sometimes. It's Whisper. We mitigate, we don't cure.
 - The Cocoa overlay and audio workers are still intentionally compact, but the text pipeline and translation backends are split out and covered by tests.

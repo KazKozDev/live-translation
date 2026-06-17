@@ -22,6 +22,7 @@ numpy==2.4.6
 
 # --- macOS glass overlay UI ---
 pyobjc-framework-Cocoa==12.2  # pulls in pyobjc-core
+pyobjc-framework-Quartz==12.2 # PDF page rendering/export
 
 # --- Tokenizers / model loading (used by mlx-lm & mlx-whisper) ---
 transformers==5.12.0

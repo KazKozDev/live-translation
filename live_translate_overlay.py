@@ -13,15 +13,11 @@ live_translate_overlay.py
 
     ./live_translate_overlay.py --target ru
 
-По умолчанию перевод идёт через MLX-версию Qwen Instruct:
-
-    mlx-community/Qwen3.5-4B-MLX-4bit
-
-Если хочешь использовать Ollama вместо MLX:
+По умолчанию перевод идёт через Ollama Gemma 4:
 
     brew install ollama
-    ollama pull qwen3.5:4b
-    ./live_translate_overlay.py --translator ollama --ollama-model qwen3.5:4b
+    ollama pull gemma4:26b-mlx
+    ./live_translate_overlay.py --ollama-model gemma4:26b-mlx
 
 Звук настраивается так же, как в record_and_transcribe.py:
 Multi-Output Device = твои наушники/колонки + BlackHole 2ch.
@@ -58,14 +54,68 @@ from live_translation.text_pipeline import (
     take_confirmed_blocks_for_translation,
     take_endpoint_blocks,
 )
-from live_translation.translators import LanguageSettings, MLXTranslator, OllamaTranslator
+from live_translation.translators import LanguageSettings, OllamaTranslator
 
 WHISPER_MODELS = {
-    "base": "mlx-community/whisper-base-mlx",
     "small": "mlx-community/whisper-small-mlx",
     "medium": "mlx-community/whisper-medium-mlx",
-    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large": "mlx-community/whisper-large-v3-mlx",
 }
+
+WHISPER_MENU = [
+    ("small", "Whisper Small"),
+    ("medium", "Whisper Medium"),
+    ("large", "Whisper Large"),
+]
+
+GEMMA_MODELS = {
+    "gemma4:26b-mlx": "Gemma 4 26B",
+    "gemma4:e4b-mlx": "Gemma 4 E4B",
+    "gemma4:12b-mlx": "Gemma 4 12B",
+}
+
+GEMMA_MENU = list(GEMMA_MODELS.items())
+
+DEFAULT_AUDIO_QUEUE_BLOCKS = 120
+STREAM_CATCHUP_HIGH_WATER = 40
+STREAM_CATCHUP_KEEP_BLOCKS = 8
+NO_SPEECH_KEEP_AUDIO_BLOCKS = 2
+CHUNK_CATCHUP_KEEP_CHUNKS = 2
+CHUNK_PRODUCER_KEEP_CHUNKS = 1
+TRANSLATION_QUEUE_KEEP_TASKS = 1
+SLOW_STEP_LOG_SECONDS = 6.0
+STATUS_UPDATE_INTERVAL_SECONDS = 0.25
+TRANSLATION_TAIL_REGROUP_SECONDS = 8.0
+TRANSLATION_TAIL_MAX_MERGED_CHARS = 420
+TRANSLATION_TAIL_MAX_SOURCE_MERGED_CHARS = 1400
+TRANSLATION_MAX_DYNAMIC_TOKENS = 900
+
+ELLIPSIS_END_RE = re.compile(r"(?:\.{2,}|…)\s*$")
+SOFT_END_RE = re.compile(r"(?:[!?]+|(?<!\.)\.(?!\.))\s*$")
+
+
+def starts_like_continuation(text):
+    text = str(text or "").lstrip()
+    if not text:
+        return False
+    if text[0] in ",;:)-—–":
+        return True
+    for char in text:
+        if char.isalpha():
+            return char.islower()
+        if char.isdigit():
+            return False
+    return False
+
+
+def translation_token_budget(text, base_tokens):
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    base_tokens = int(base_tokens or 180)
+    # Translation into Russian often expands versus Spanish/English. The default
+    # live limit is intentionally small for latency, but polished merged paragraphs
+    # need enough room to finish instead of stopping mid-word.
+    estimated = int(len(text) * 0.9) + 96
+    return max(base_tokens, min(TRANSLATION_MAX_DYNAMIC_TOKENS, estimated))
 
 
 def find_blackhole():
@@ -86,10 +136,17 @@ class ConsoleOverlay:
         self.stop_event = stop_event
         self.show_partial = show_partial
 
-    def post_pair(self, source, translated, pause_ms=0):
+    def post_pair(
+        self,
+        source,
+        translated,
+        pause_ms=0,
+        replace_translation_tail=False,
+        combined_source=None,
+    ):
         print("\n--- transcript ---")
         print(source)
-        print("--- translation ---")
+        print("--- translation" + (" (revised) ---" if replace_translation_tail else " ---"))
         print(translated, flush=True)
 
     def post_status(self, lag_chunks):
@@ -153,14 +210,16 @@ def _glass_pdf_view_class():
 
             fill = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.62)
             rim = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.9)
+            card_radius = float(getattr(self, "_card_radius", 20.0))
+            shadow_blur = float(getattr(self, "_shadow_blur", 16.0))
             for rect in self._cards:
                 path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    rect, 20.0, 20.0
+                    rect, card_radius, card_radius
                 )
                 NSGraphicsContext.saveGraphicsState()
                 shadow = NSShadow.alloc().init()
                 shadow.setShadowColor_(NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.13))
-                shadow.setShadowBlurRadius_(16.0)
+                shadow.setShadowBlurRadius_(shadow_blur)
                 shadow.setShadowOffset_((0.0, 3.0))  # flipped view -> downward
                 shadow.set()
                 fill.set()
@@ -256,9 +315,13 @@ class GlassOverlay:
         self.original_blocks = []
         self.translation_blocks = []
         self.history_pairs = []  # full, uncapped transcript+translation for export
+        self.session_started_at = time.monotonic()
+        self._last_status_posted_at = 0.0
+        self._last_status_value = 0
         self.font_size = 20
         self.compact_mode = False
         self.pin_enabled = True
+        self.settings_visible = False
         self.app = NSApplication.sharedApplication()
         self.app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
 
@@ -289,6 +352,15 @@ class GlassOverlay:
 
             def savePDF_(menu_self, sender):
                 self._save_pdf(sender)
+
+            def settingsToggled_(menu_self, sender):
+                self._settings_toggled(sender)
+
+            def whisperChanged_(menu_self, sender):
+                self._whisper_changed(sender)
+
+            def ollamaModelChanged_(menu_self, sender):
+                self._ollama_model_changed(sender)
 
         class WindowDelegate(NSObject):
             def windowDidResize_(delegate_self, notification):
@@ -411,6 +483,13 @@ class GlassOverlay:
             "savePDF:",
             momentary=True,
         )
+        self.settings_button = self._make_button(
+            NSMakeRect(controls_x, menu_y, 32, 28),
+            "Settings",
+            "settingsToggled:",
+            momentary=True,
+        )
+        self._set_gear_icon(self.settings_button)
         for control in (
             self.compact_button,
             self.pin_button,
@@ -419,6 +498,7 @@ class GlassOverlay:
             self.larger_button,
             self.clear_button,
             self.save_button,
+            self.settings_button,
         ):
             visual.addSubview_(control)
 
@@ -463,6 +543,65 @@ class GlassOverlay:
             alpha=0.62,
         )
         visual.addSubview_(self.status_label)
+
+        self.settings_panel = NSVisualEffectView.alloc().initWithFrame_(
+            NSMakeRect(width - inset - 456, menu_y - 80, 456, 70)
+        )
+        self.settings_panel.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        self.settings_panel.setMaterial_(NSVisualEffectMaterialHUDWindow)
+        self.settings_panel.setState_(NSVisualEffectStateActive)
+        self.settings_panel.setHidden_(True)
+        self.settings_panel.setWantsLayer_(True)
+        try:
+            self.settings_panel.layer().setCornerRadius_(14.0)
+            self.settings_panel.layer().setMasksToBounds_(True)
+        except Exception:
+            pass
+        visual.addSubview_(self.settings_panel)
+
+        self.whisper_settings_label = self._make_label(
+            NSTextField,
+            "Whisper",
+            NSMakeRect(14, 42, 64, 18),
+            size=12,
+            alpha=0.72,
+        )
+        self.whisper_popup = self._make_popup(
+            NSPopUpButton,
+            NSMakeRect(82, 36, 142, 28),
+            WHISPER_MENU,
+            self.settings.get_whisper_size(),
+            "whisperChanged:",
+        )
+        self.model_settings_label = self._make_label(
+            NSTextField,
+            "Gemma",
+            NSMakeRect(244, 42, 54, 18),
+            size=12,
+            alpha=0.72,
+        )
+        self.ollama_model_popup = self._make_popup(
+            NSPopUpButton,
+            NSMakeRect(302, 36, 138, 28),
+            GEMMA_MENU,
+            self.settings.get_ollama_model(),
+            "ollamaModelChanged:",
+        )
+        self.settings_hint_label = self._make_label(
+            NSTextField,
+            "Applies to the next audio block",
+            NSMakeRect(14, 12, 426, 18),
+            size=11,
+            alpha=0.52,
+        )
+        for control in (
+            self.whisper_settings_label,
+            self.whisper_popup,
+            self.model_settings_label,
+            self.ollama_model_popup,
+            self.settings_hint_label,
+        ):
+            self.settings_panel.addSubview_(control)
 
         left_x = inset
         right_x = inset + column_width + gap
@@ -538,6 +677,8 @@ class GlassOverlay:
         self.translated_view.setString_(self._waiting_translation())
         self.left_scroll.setDocumentView_(self.original_view)
         self.right_scroll.setDocumentView_(self.translated_view)
+        self.settings_panel.removeFromSuperview()
+        visual.addSubview_(self.settings_panel)
 
         self.NSApp = NSApp
         self._layout_ready = True
@@ -565,7 +706,8 @@ class GlassOverlay:
         source_width = 126
         control_gap = 18
         save_x = width - inset - 50
-        clear_x = save_x - 10 - 40
+        settings_x = save_x - 10 - 32
+        clear_x = settings_x - 10 - 40
         status_x = clear_x - control_gap - status_width
         target_label_x = status_x - control_gap - target_width - 44
         target_popup_x = target_label_x + 44
@@ -586,6 +728,7 @@ class GlassOverlay:
         self.larger_button.setFrame_(self.NSMakeRect(controls_x, menu_y, 32, 28))
 
         self.save_button.setFrame_(self.NSMakeRect(save_x, menu_y, 50, 28))
+        self.settings_button.setFrame_(self.NSMakeRect(settings_x, menu_y, 32, 28))
         self.clear_button.setFrame_(self.NSMakeRect(clear_x, menu_y, 40, 28))
         self.source_label.setFrame_(self.NSMakeRect(source_label_x, menu_y + 5, 44, 18))
         self.source_popup.setFrame_(self.NSMakeRect(source_popup_x, menu_y, source_width, 28))
@@ -599,12 +742,15 @@ class GlassOverlay:
         left_end = inset + 86 + 56 + 50 + 96 + 36 + 32  # right edge of left cluster
         edge = left_end + 12
         show_save = save_x >= edge
+        show_settings = settings_x >= edge
         show_clear = clear_x >= edge
         show_status = status_x >= edge
         show_target = target_label_x >= edge
         show_source = source_label_x >= edge
         self.save_button.setHidden_(not show_save)
+        self.settings_button.setHidden_(not show_settings)
         self.clear_button.setHidden_(not show_clear)
+        self.settings_panel.setHidden_((not self.settings_visible) or (not show_settings))
         self.status_label.setHidden_(not show_status)
         self.target_label.setHidden_(not show_target)
         self.target_popup.setHidden_(not show_target)
@@ -640,6 +786,15 @@ class GlassOverlay:
             self.translation_label.setFrame_(self.expanded_frames["translation_label"])
         self.original_view.setFrame_(self.left_scroll.contentView().bounds())
         self.translated_view.setFrame_(self.right_scroll.contentView().bounds())
+        panel_w = min(456, max(300, width - inset * 2))
+        panel_x = max(inset, width - inset - panel_w)
+        panel_y = max(scroll_y + 8, menu_y - 80)
+        self.settings_panel.setFrame_(self.NSMakeRect(panel_x, panel_y, panel_w, 70))
+        self.whisper_popup.setFrame_(self.NSMakeRect(82, 36, min(142, panel_w - 96), 28))
+        model_x = min(244, max(14, panel_w - 212))
+        self.model_settings_label.setFrame_(self.NSMakeRect(model_x, 42, 54, 18))
+        self.ollama_model_popup.setFrame_(self.NSMakeRect(model_x + 58, 36, max(120, panel_w - model_x - 72), 28))
+        self.settings_hint_label.setFrame_(self.NSMakeRect(14, 12, panel_w - 28, 18))
         # Re-flow text into the new frames; without this the resized text views go blank.
         self._render_original()
         self._render_translation()
@@ -682,6 +837,22 @@ class GlassOverlay:
         except Exception:
             pass  # fall back to the "Clear" text title
 
+    def _set_gear_icon(self, button):
+        try:
+            from AppKit import NSImage, NSImageOnly
+
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_("gearshape", "Settings")
+            if img is not None:
+                button.setImage_(img)
+                button.setImagePosition_(NSImageOnly)
+                button.setTitle_("")
+                try:
+                    button.setContentTintColor_(self.NSColor.whiteColor())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _make_line(self, frame, color):
         line = self.NSView.alloc().initWithFrame_(frame)
         line.setWantsLayer_(True)
@@ -690,10 +861,15 @@ class GlassOverlay:
 
     def _make_popup(self, popup_cls, frame, items, selected_code, action):
         popup = popup_cls.alloc().initWithFrame_pullsDown_(frame, False)
+        selected_label = None
         for code, label in items:
             popup.addItemWithTitle_(label)
             popup.itemWithTitle_(label).setRepresentedObject_(code)
-        popup.selectItemWithTitle_(language_label(selected_code))
+            if code == selected_code:
+                selected_label = label
+        if selected_label is None:
+            selected_label = language_label(selected_code)
+        popup.selectItemWithTitle_(selected_label)
         popup.setTarget_(self.menu_target)
         popup.setAction_(action)
         return popup
@@ -731,6 +907,32 @@ class GlassOverlay:
             self.settings.set_target(code)
         self._render_translation()  # refresh placeholder language if empty
 
+    def _settings_toggled(self, sender):
+        self.settings_visible = not self.settings_visible
+        self.settings_panel.setHidden_(not self.settings_visible)
+        self._relayout()
+
+    def _whisper_changed(self, sender):
+        code = self._selected_code(sender)
+        if code in WHISPER_MODELS:
+            self.settings.set_whisper_size(code)
+
+    def _ollama_model_changed(self, sender):
+        code = self._selected_code(sender)
+        if code not in GEMMA_MODELS:
+            return
+        previous = self.settings.get_ollama_model()
+        self.settings.set_ollama_model(code)
+        translator = getattr(self, "translator", None)
+        if previous and previous != code and translator is not None:
+            # Free the old model from VRAM right now, on a background thread so the menu
+            # doesn't hang on the Ollama unload request. The new model loads on the next
+            # translation. (The translation worker would also unload it on its next phrase;
+            # a double unload is harmless.)
+            threading.Thread(
+                target=translator._unload, args=(previous,), daemon=True
+            ).start()
+
     def _compact_changed(self, sender):
         self.compact_mode = not self.compact_mode
         self.left_scroll.setHidden_(self.compact_mode)
@@ -764,6 +966,7 @@ class GlassOverlay:
         self.original_blocks = []
         self.translation_blocks = []
         self.history_pairs = []
+        self.session_started_at = time.monotonic()
         self.partial_text = ""
         # Also wipe both workers' rolling state (audio buffer, tail, sentence buffer,
         # Whisper context) and pending queues so it restarts from a clean slate.
@@ -786,6 +989,8 @@ class GlassOverlay:
 
     def _save_pdf(self, sender=None):
         import datetime
+        import os
+        import re
 
         from AppKit import NSSavePanel
 
@@ -807,9 +1012,18 @@ class GlassOverlay:
 
         from AppKit import (
             NSGradient,
+            NSGraphicsContext,
             NSKernAttributeName,
             NSMutableParagraphStyle,
             NSParagraphStyleAttributeName,
+        )
+        from Foundation import NSURL
+        from Quartz import (
+            CGRectMake,
+            CGPDFContextBeginPage,
+            CGPDFContextClose,
+            CGPDFContextCreateWithURL,
+            CGPDFContextEndPage,
         )
 
         NSColor = self.NSColor
@@ -817,11 +1031,12 @@ class GlassOverlay:
         NSFontAttr = self.NSFontAttributeName
         NSFgAttr = self.NSForegroundColorAttributeName
 
-        # --- "liquid glass" palette --------------------------------------
-        page_width = 612.0          # US Letter width
-        outer = 46.0                # page margin
-        card_gap = 14.0             # vertical gap between cards
-        pad_x, pad_top, pad_bottom = 26.0, 18.0, 20.0
+        page_width = 595.28
+        page_height = 841.89
+        outer = 30.0
+        card_gap = 8.0
+        pad_x, pad_top, pad_bottom = 16.0, 10.0, 12.0
+        footer_h = 24.0
         inner_w = page_width - outer * 2 - pad_x * 2
 
         c_title = NSColor.colorWithCalibratedWhite_alpha_(0.13, 1.0)
@@ -839,10 +1054,15 @@ class GlassOverlay:
             ]
         )
 
-        title_font = NSFont.systemFontOfSize_weight_(26.0, 0.32)
-        subtitle_font = NSFont.systemFontOfSize_(12.0)
-        label_font = NSFont.systemFontOfSize_weight_(9.5, 0.34)
-        body_font = NSFont.systemFontOfSize_(13.0)
+        title_font = NSFont.systemFontOfSize_weight_(20.0, 0.32)
+        subtitle_font = NSFont.systemFontOfSize_(9.5)
+        label_font = NSFont.systemFontOfSize_weight_(7.8, 0.34)
+        body_font = NSFont.systemFontOfSize_(10.4)
+        footer_font = NSFont.systemFontOfSize_(7.8)
+        try:
+            time_font = NSFont.monospacedDigitSystemFontOfSize_weight_(8.2, 0.34)
+        except Exception:
+            time_font = label_font
 
         def para(line_spacing=0.0, after=0.0, before=0.0):
             p = NSMutableParagraphStyle.alloc().init()
@@ -851,10 +1071,12 @@ class GlassOverlay:
             p.setParagraphSpacingBefore_(before)
             return p
 
-        ps_body = para(line_spacing=3.5)
-        ps_label = para(after=3.0)
-        ps_label_before = para(after=3.0, before=15.0)
-        ps_title = para(after=4.0)
+        ps_body = para(line_spacing=1.6)
+        ps_label = para(after=2.0)
+        ps_label_before = para(after=2.0, before=8.0)
+        ps_time = para(after=3.0)
+        ps_footer = para(line_spacing=1.2)
+        ps_title = para(after=2.0)
 
         def piece(text, font, color, ps, kern=None):
             attrs = {NSFgAttr: color, NSFontAttr: font, NSParagraphStyleAttributeName: ps}
@@ -864,9 +1086,7 @@ class GlassOverlay:
 
         from AppKit import NSTextView
 
-        # Render text via NSTextView (TextKit) so what we measure is exactly what
-        # gets drawn — boundingRectWithSize mis-measures paragraphSpacingBefore and
-        # silently clips the last line on short blocks.
+        # TextKit measurement matches final NSTextView rendering and avoids clipped last lines.
         def make_tv(attr, width):
             tv = NSTextView.alloc().initWithFrame_(((0, 0), (width, 1.0e6)))
             tv.setDrawsBackground_(False)
@@ -880,78 +1100,197 @@ class GlassOverlay:
             h = float(lm.usedRectForTextContainer_(tc).size.height)
             return tv, h
 
-        # --- header ------------------------------------------------------
-        human = datetime.datetime.now().strftime("%d %B %Y · %H:%M")
+        def format_timecode(pair):
+            elapsed = pair.get("elapsed")
+            if elapsed is None:
+                absolute = pair.get("time")
+                if isinstance(absolute, (int, float)):
+                    elapsed = absolute - getattr(self, "session_started_at", absolute)
+            if elapsed is None:
+                return "--:--:--"
+            total = max(0, int(round(float(elapsed))))
+            hours, rem = divmod(total, 3600)
+            minutes, seconds = divmod(rem, 60)
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        human = datetime.datetime.now().strftime("%d %B %Y - %H:%M")
         header = self.NSMutableAttributedString.alloc().init()
         header.appendAttributedString_(piece("Live Translation\n", title_font, c_title, ps_title))
         header.appendAttributedString_(piece(human, subtitle_font, c_subtitle, para()))
         header_w = page_width - outer * 2
-        header_tv, header_h = make_tv(header, header_w)
-        header_gap = 20.0
+        _, header_h = make_tv(header, header_w)
+        header_gap = 14.0
+        content_bottom = page_height - outer - footer_h
+        first_page_max_card_h = content_bottom - (outer + header_h + header_gap)
+        max_card_h = max(120.0, first_page_max_card_h)
 
-        # --- build one card per pair ------------------------------------
-        cards = []  # (text_view, content_h, card_h)
+        def make_card(src, tr, timecode, continued=False):
+            src = (src or "").strip()
+            tr = (tr or "").strip()
+            first_label = "ORIGINAL" if src else "TRANSLATION"
+            first_label_color = c_label if src else c_accent
+            suffix = " CONT." if continued else ""
+            content = self.NSMutableAttributedString.alloc().init()
+            content.appendAttributedString_(piece(f"{timecode}  ", time_font, c_label, ps_time, kern=0.2))
+            content.appendAttributedString_(piece(f"{first_label}{suffix}\n", label_font, first_label_color, ps_time, kern=1.2))
+            if src:
+                content.appendAttributedString_(
+                    piece(src + ("\n" if tr else ""), body_font, c_src, ps_body)
+                )
+            if tr:
+                if src:
+                    content.appendAttributedString_(piece("TRANSLATION\n", label_font, c_accent, ps_label_before, kern=1.2))
+                content.appendAttributedString_(piece(tr, body_font, c_tr, ps_body))
+            _, content_h = make_tv(content, inner_w)
+            return {"attr": content, "content_h": content_h, "card_h": pad_top + content_h + pad_bottom}
+
+        def tokens_for(text):
+            tokens = re.findall(r"\S+\s*", text)
+            if tokens:
+                return tokens
+            return [text[i : i + 120] for i in range(0, len(text), 120)]
+
+        def split_single(label, text, timecode):
+            tokens = tokens_for(text.strip())
+            cards = []
+            pos = 0
+            while pos < len(tokens):
+                lo, hi = 1, len(tokens) - pos
+                best = 1
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    chunk = "".join(tokens[pos : pos + mid]).strip()
+                    src = chunk if label == "ORIGINAL" else ""
+                    tr = chunk if label == "TRANSLATION" else ""
+                    card = make_card(src, tr, timecode, continued=bool(cards))
+                    if card["card_h"] <= max_card_h:
+                        best = mid
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                chunk = "".join(tokens[pos : pos + best]).strip()
+                src = chunk if label == "ORIGINAL" else ""
+                tr = chunk if label == "TRANSLATION" else ""
+                cards.append(make_card(src, tr, timecode, continued=bool(cards)))
+                pos += best
+            return cards
+
+        cards = []
         for pair in self.history_pairs:
             src = (pair.get("source") or "").strip()
             tr = (pair.get("translated") or "").strip()
             if not src and not tr:
                 continue
-            content = self.NSMutableAttributedString.alloc().init()
-            if src:
-                content.appendAttributedString_(
-                    piece("ORIGINAL\n", label_font, c_label, ps_label, kern=1.3)
-                )
-                content.appendAttributedString_(
-                    piece(src + ("\n" if tr else ""), body_font, c_src, ps_body)
-                )
-            if tr:
-                lbl_ps = ps_label_before if src else ps_label
-                content.appendAttributedString_(
-                    piece("TRANSLATION\n", label_font, c_accent, lbl_ps, kern=1.3)
-                )
-                content.appendAttributedString_(piece(tr, body_font, c_tr, ps_body))
-            tv, content_h = make_tv(content, inner_w)
-            cards.append((tv, content_h, pad_top + content_h + pad_bottom))
+            timecode = format_timecode(pair)
+            card = make_card(src, tr, timecode)
+            if card["card_h"] <= max_card_h:
+                cards.append(card)
+            else:
+                if src:
+                    cards.extend(split_single("ORIGINAL", src, timecode))
+                if tr:
+                    cards.extend(split_single("TRANSLATION", tr, timecode))
 
         if not cards:
             self._notify("Нечего сохранять", "Пока нет переведённого текста.")
             return
 
-        total_h = (
-            outer
-            + header_h
-            + header_gap
-            + sum(card_h for _, _, card_h in cards)
-            + card_gap * (len(cards) - 1)
-            + outer
-        )
+        pages = []
+        current = []
+        include_header = True
+        y = outer + header_h + header_gap
+        for card in cards:
+            gap = card_gap if current else 0.0
+            if current and y + gap + card["card_h"] > content_bottom:
+                pages.append((include_header, current))
+                current = []
+                include_header = False
+                y = outer
+                gap = 0.0
+            current.append(card)
+            y += gap + card["card_h"]
+        if current:
+            pages.append((include_header, current))
 
         ViewClass = _glass_pdf_view_class()
-        view = ViewClass.alloc().initWithFrame_(((0, 0), (page_width, total_h)))
-        view._gradient = gradient
-        view._texts = []  # text is drawn by NSTextView subviews, not by the view
 
-        # --- lay out (flipped view: y grows downward from the top) ------
-        card_rects = []
-        header_tv.setFrame_(((outer, outer), (header_w, header_h)))
-        view.addSubview_(header_tv)
-        y = outer + header_h + header_gap
-        for tv, content_h, card_h in cards:
-            card_rects.append(((outer, y), (page_width - outer * 2, card_h)))
-            tv.setFrame_(((outer + pad_x, y + pad_top), (inner_w, content_h)))
+        def add_text_view(view, attr, x, y_pos, width):
+            tv, tv_h = make_tv(attr, width)
+            tv.setFrame_(((x, y_pos), (width, tv_h)))
             view.addSubview_(tv)
-            y += card_h + card_gap
-        view._cards = card_rects
+            return tv_h
 
-        data = view.dataWithPDFInsideRect_(view.bounds())
-        ok = bool(data) and bool(data.writeToFile_atomically_(path, True))
+        def make_page_view(page_index, total_pages, has_header, page_cards):
+            view = ViewClass.alloc().initWithFrame_(((0, 0), (page_width, page_height)))
+            view._gradient = gradient
+            view._texts = []
+            view._cards = []
+            view._card_radius = 12.0
+            view._shadow_blur = 8.0
+
+            y_pos = outer
+            if has_header:
+                add_text_view(view, header, outer, y_pos, header_w)
+                y_pos += header_h + header_gap
+
+            for idx, card in enumerate(page_cards):
+                if idx:
+                    y_pos += card_gap
+                view._cards.append(((outer, y_pos), (page_width - outer * 2, card["card_h"])))
+                tv, _ = make_tv(card["attr"], inner_w)
+                tv.setFrame_(((outer + pad_x, y_pos + pad_top), (inner_w, card["content_h"])))
+                view.addSubview_(tv)
+                y_pos += card["card_h"]
+
+            footer = self.NSMutableAttributedString.alloc().init()
+            footer_text = f"Live Translation - {page_index + 1}/{total_pages}"
+            if page_index == 0:
+                footer_text += (
+                    "\nTimecode is measured from app launch; launch time is treated as 00:00:00."
+                )
+            footer.appendAttributedString_(
+                piece(footer_text, footer_font, c_subtitle, ps_footer)
+            )
+            add_text_view(view, footer, outer, page_height - outer - footer_h, header_w)
+            return view
+
+        media_box = CGRectMake(0.0, 0.0, page_width, page_height)
+        ctx = CGPDFContextCreateWithURL(NSURL.fileURLWithPath_(path), media_box, None)
+        ok = bool(ctx)
+        if ok:
+            total_pages = len(pages)
+            for page_index, (has_header, page_cards) in enumerate(pages):
+                page_view = make_page_view(page_index, total_pages, has_header, page_cards)
+                CGPDFContextBeginPage(ctx, {})
+                graphics = NSGraphicsContext.graphicsContextWithCGContext_flipped_(ctx, False)
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.setCurrentContext_(graphics)
+                page_view.displayRectIgnoringOpacity_inContext_(page_view.bounds(), graphics)
+                NSGraphicsContext.restoreGraphicsState()
+                CGPDFContextEndPage(ctx)
+            CGPDFContextClose(ctx)
+            ok = os.path.exists(path) and os.path.getsize(path) > 0
         self._notify(
             "PDF сохранён" if ok else "Ошибка",
             path if ok else "Не удалось записать файл.",
         )
 
-    def post_pair(self, source, translated, pause_ms=0):
-        self.AppHelper.callAfter(self._append_pair, source, translated, pause_ms)
+    def post_pair(
+        self,
+        source,
+        translated,
+        pause_ms=0,
+        replace_translation_tail=False,
+        combined_source=None,
+    ):
+        self.AppHelper.callAfter(
+            self._append_pair,
+            source,
+            translated,
+            pause_ms,
+            replace_translation_tail,
+            combined_source,
+        )
 
     def post_partial(self, source):
         if not self.show_partial:
@@ -959,6 +1298,17 @@ class GlassOverlay:
         self.AppHelper.callAfter(self._set_partial, source)
 
     def post_status(self, lag_chunks):
+        lag_chunks = int(lag_chunks)
+        now = time.monotonic()
+        if (
+            lag_chunks != 0
+            and now - self._last_status_posted_at < STATUS_UPDATE_INTERVAL_SECONDS
+        ):
+            return
+        if lag_chunks == self._last_status_value and now - self._last_status_posted_at < 1.0:
+            return
+        self._last_status_posted_at = now
+        self._last_status_value = lag_chunks
         self.AppHelper.callAfter(self._set_status, lag_chunks)
 
     def _set_status(self, lag_chunks):
@@ -966,14 +1316,37 @@ class GlassOverlay:
         alpha = 0.9 if lag_chunks else 0.62
         self.status_label.setTextColor_(self.NSColor.whiteColor().colorWithAlphaComponent_(alpha))
 
-    def _append_pair(self, source, translated, pause_ms=0):
+    def _append_pair(
+        self,
+        source,
+        translated,
+        pause_ms=0,
+        replace_translation_tail=False,
+        combined_source=None,
+    ):
         # Guard the main-thread render path: an exception here can stop the run loop from
         # delivering further UI updates, freezing the display while workers keep running.
         try:
             now = time.monotonic()
             speaker_gap = pause_ms >= 1400
             if source and not str(translated).startswith("Ошибка:"):
-                self.history_pairs.append({"source": source, "translated": translated or ""})
+                if replace_translation_tail and self.history_pairs:
+                    previous = self.history_pairs[-1]
+                    previous["source"] = str(combined_source or "").strip() or (
+                        f"{str(previous.get('source') or '').rstrip()} {source}".strip()
+                    )
+                    previous["translated"] = translated or ""
+                    previous["time"] = now
+                    previous["elapsed"] = now - self.session_started_at
+                else:
+                    self.history_pairs.append(
+                        {
+                            "source": source,
+                            "translated": translated or "",
+                            "time": now,
+                            "elapsed": now - self.session_started_at,
+                        }
+                    )
                 if len(self.history_pairs) > 5000:
                     self.history_pairs = self.history_pairs[-5000:]
             if source:
@@ -982,11 +1355,91 @@ class GlassOverlay:
                 self.partial_text = ""
                 self._render_original()
             if translated:
-                self.translation_blocks.append({"text": translated, "time": now, "gap": speaker_gap})
-                self.translation_blocks = self.translation_blocks[-16:]
+                if replace_translation_tail:
+                    self._replace_translation_tail(
+                        translated,
+                        now,
+                        bool(speaker_gap),
+                        combined_source or source,
+                    )
+                else:
+                    self._append_translation_block(translated, now, speaker_gap, source)
                 self._render_translation()
         except Exception as exc:
             print(f"[ui] _append_pair: {exc!r}", file=sys.stderr)
+
+    def _should_merge_translation_tail(self, previous, incoming, now, speaker_gap, incoming_source=None):
+        previous_text = (previous.get("text") or "").strip()
+        incoming_text = (incoming or "").strip()
+        previous_source = (previous.get("source") or "").strip()
+        incoming_source = (incoming_source or "").strip()
+        if not previous_text or not incoming_text:
+            return False
+        boundary_text = previous_source or previous_text
+        source_aware = bool(previous_source and incoming_source)
+        if (
+            not source_aware
+            and now - float(previous.get("time") or now) > TRANSLATION_TAIL_REGROUP_SECONDS
+        ):
+            return False
+        max_merged = (
+            TRANSLATION_TAIL_MAX_SOURCE_MERGED_CHARS
+            if source_aware
+            else TRANSLATION_TAIL_MAX_MERGED_CHARS
+        )
+        if len(previous_text) + len(incoming_text) > max_merged:
+            return False
+        if boundary_text.endswith((",", ";", ":", "-", "—")):
+            return True
+        if ELLIPSIS_END_RE.search(boundary_text):
+            return True
+        if SOFT_END_RE.search(boundary_text):
+            if source_aware and starts_like_continuation(incoming_source):
+                return True
+            return False
+        if speaker_gap and not source_aware:
+            return False
+        return source_aware
+
+    def _append_translation_block(self, translated, now, speaker_gap, source=None):
+        text = str(translated).strip()
+        if not text:
+            return
+        source_text = str(source or "").strip()
+        if self.translation_blocks and self._should_merge_translation_tail(
+            self.translation_blocks[-1],
+            text,
+            now,
+            speaker_gap,
+            source_text,
+        ):
+            previous = self.translation_blocks[-1]
+            previous["text"] = f"{str(previous.get('text') or '').rstrip()} {text}".strip()
+            if source_text:
+                previous["source"] = f"{str(previous.get('source') or '').rstrip()} {source_text}".strip()
+            previous["time"] = now
+            previous["gap"] = bool(previous.get("gap")) or speaker_gap
+        else:
+            self.translation_blocks.append(
+                {"text": text, "source": source_text, "time": now, "gap": speaker_gap}
+            )
+        self.translation_blocks = self.translation_blocks[-16:]
+
+    def _replace_translation_tail(self, translated, now, speaker_gap, source=None):
+        text = str(translated).strip()
+        if not text:
+            return
+        source_text = str(source or "").strip()
+        if not self.translation_blocks:
+            self.translation_blocks.append(
+                {"text": text, "source": source_text, "time": now, "gap": speaker_gap}
+            )
+            return
+        previous = self.translation_blocks[-1]
+        previous["text"] = text
+        previous["source"] = source_text
+        previous["time"] = now
+        previous["gap"] = bool(previous.get("gap"))
 
     def _set_partial(self, source):
         try:
@@ -1082,24 +1535,72 @@ class GlassOverlay:
 
 
 def put_drop_oldest(q, item):
+    dropped = False
     try:
         q.put_nowait(item)
     except queue.Full:
         try:
             q.get_nowait()
+            dropped = True
         except queue.Empty:
             pass
         q.put_nowait(item)
+    return dropped
 
 
-def put_wait(q, item, stop_event):
-    while not stop_event.is_set():
+def drain_queue_keep_latest(q, keep=0):
+    drained = []
+    while True:
         try:
-            q.put(item, timeout=0.2)
-            return True
-        except queue.Full:
-            continue
-    return False
+            drained.append(q.get_nowait())
+        except queue.Empty:
+            break
+    if keep > 0 and drained:
+        for item in drained[-keep:]:
+            try:
+                q.put_nowait(item)
+            except queue.Full:
+                break
+    return max(0, len(drained) - keep)
+
+
+def enqueue_translation(translation_q, source_text, pause_ms=0.0, source_language=None):
+    if not source_text:
+        return
+    if translation_q.maxsize and translation_q.qsize() >= translation_q.maxsize:
+        dropped = drain_queue_keep_latest(translation_q, TRANSLATION_QUEUE_KEEP_TASKS)
+        if dropped:
+            print(
+                f"[translate] очередь перевода переполнена — сброшено {dropped}, оставляю свежие задачи",
+                file=sys.stderr,
+            )
+    task = {
+        "source": source_text,
+        "pause_ms": float(pause_ms or 0.0),
+    }
+    if source_language:
+        # Resolved source language (e.g. Whisper's detected language in auto mode), so the
+        # translator doesn't have to fall back to "auto" — matters for TranslateGemma.
+        task["source_language"] = source_language
+    dropped = put_drop_oldest(translation_q, task)
+    if dropped:
+        print("[translate] очередь перевода забита — пропущена старая задача", file=sys.stderr)
+
+
+def should_retranslate_merged_source(previous_source, incoming_source, pause_ms=0.0):
+    previous_source = str(previous_source or "").strip()
+    incoming_source = str(incoming_source or "").strip()
+    if not previous_source or not incoming_source:
+        return False
+    if len(previous_source) + len(incoming_source) > TRANSLATION_TAIL_MAX_SOURCE_MERGED_CHARS:
+        return False
+    if previous_source.endswith((",", ";", ":", "-", "—")):
+        return True
+    if ELLIPSIS_END_RE.search(previous_source):
+        return True
+    if SOFT_END_RE.search(previous_source):
+        return starts_like_continuation(incoming_source)
+    return True
 
 
 def load_vad():
@@ -1374,23 +1875,35 @@ def chunk_worker(
             continue
         try:
             block_rms = float(np.sqrt(np.mean(np.square(block.astype(np.float32)))))
+            block_ms = len(block) / samplerate * 1000.0
             if block_rms >= silence_rms:
                 trailing_silence_ms = 0.0
                 endpoint_sent = False
             else:
-                trailing_silence_ms += len(block) / samplerate * 1000.0
+                trailing_silence_ms += block_ms
                 if trailing_silence_ms >= endpointing_ms and not endpoint_sent:
                     endpoint_sent = True
-                    put_wait(
+                    dropped = put_drop_oldest(
                         chunk_q,
                         {
                             "audio": None,
                             "endpoint": True,
                             "trailing_silence_ms": trailing_silence_ms,
                         },
-                        stop_event,
                     )
+                    if dropped:
+                        print("[chunk] очередь забита — пропущен старый чанк, догоняю", file=sys.stderr)
                     overlay.post_status(chunk_q.qsize())
+                if len(buffer) == 0:
+                    if endpoint_sent and audio_q.qsize() > NO_SPEECH_KEEP_AUDIO_BLOCKS:
+                        drained = drain_queue_keep_latest(audio_q, NO_SPEECH_KEEP_AUDIO_BLOCKS)
+                        if drained:
+                            print(
+                                f"[chunk] нет речи — сброшено ~{drained * block_ms / 1000.0:.1f}s тишины",
+                                file=sys.stderr,
+                            )
+                            overlay.post_status(chunk_q.qsize())
+                    continue
 
             if channel_count is None:
                 channel_count = block.shape[1] if block.ndim > 1 else 1
@@ -1427,17 +1940,26 @@ def chunk_worker(
             rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float32)))))
             if rms < silence_rms:
                 continue
-            # No-loss: block until there's room rather than dropping a chunk. The transcribe
-            # worker keeps up (each chunk is transcribed exactly once), so this rarely waits.
-            put_wait(
+            # Recovery-first: under normal load every chunk is processed once; if the
+            # transcribe/translate worker falls badly behind, keep the freshest chunks
+            # instead of blocking forever on stale audio.
+            if chunk_q.maxsize and chunk_q.qsize() >= chunk_q.maxsize:
+                drained = drain_queue_keep_latest(chunk_q, CHUNK_PRODUCER_KEEP_CHUNKS)
+                if drained:
+                    print(
+                        f"[chunk] очередь переполнена — сброшено {drained}, оставляю свежий хвост",
+                        file=sys.stderr,
+                    )
+            dropped = put_drop_oldest(
                 chunk_q,
                 {
                     "audio": audio,
                     "endpoint": trailing_silence_ms >= endpointing_ms,
                     "trailing_silence_ms": trailing_silence_ms,
                 },
-                stop_event,
             )
+            if dropped:
+                print("[chunk] очередь забита — пропущен старый чанк, догоняю", file=sys.stderr)
             overlay.post_status(chunk_q.qsize())
         except Exception as exc:
             # Never let the chunk thread die silently — that permanently stops transcription.
@@ -1450,11 +1972,10 @@ def chunk_worker(
 
 def transcribe_translate_worker(
     chunk_q,
+    translation_q,
     overlay,
-    translator,
     stop_event,
     samplerate,
-    whisper_model,
     settings,
     sentence_mode,
     flush_after,
@@ -1476,6 +1997,12 @@ def transcribe_translate_worker(
     buffer_started_at = None
     recent_context = ""  # last committed/emitted text, fed to Whisper as initial_prompt
     seen_gen = reset_gen[0] if reset_gen is not None else 0
+
+    def maybe_log_slow(label, started_at, extra=""):
+        elapsed = time.monotonic() - started_at
+        if elapsed >= SLOW_STEP_LOG_SECONDS:
+            suffix = f" {extra}" if extra else ""
+            print(f"[{label}] медленно: {elapsed:.1f}s{suffix}", file=sys.stderr)
 
     def note_context(text):
         # Keep the most recent ~240 chars of finalized text to condition the next chunk.
@@ -1511,13 +2038,9 @@ def transcribe_translate_worker(
                 max_sentences=max_sentences,
             )
         for source_text in blocks:
-            source_language, target_language = settings.get()
-            translator.set_target(target_language)
             source_text = sentence_case_text(source_text)
-            translated = translator.translate(source_text)
-            if translated:
-                overlay.post_pair(source_text, translated, pause_ms=pause_ms)
-                note_context(source_text)
+            enqueue_translation(translation_q, source_text, pause_ms=pause_ms)
+            note_context(source_text)
         overlay.post_partial(sentence_case_text(sentence_buffer))
         if not sentence_buffer:
             buffer_started_at = None
@@ -1539,6 +2062,23 @@ def transcribe_translate_worker(
                     chunk_q.get_nowait()
                 except queue.Empty:
                     break
+            while True:
+                try:
+                    translation_q.get_nowait()
+                except queue.Empty:
+                    break
+
+        if chunk_q.maxsize and chunk_q.qsize() >= chunk_q.maxsize:
+            dropped = drain_queue_keep_latest(chunk_q, CHUNK_CATCHUP_KEEP_CHUNKS)
+            if dropped:
+                last_text = ""
+                if sentence_buffer.strip():
+                    emit_final_blocks(force=True, pause_ms=0.0)
+                overlay.post_status(chunk_q.qsize())
+                print(
+                    f"[transcribe] очередь чанков полная — сброшено {dropped}, беру свежие; буфер фразы сохранён",
+                    file=sys.stderr,
+                )
 
         try:
             item = chunk_q.get(timeout=0.2)
@@ -1572,10 +2112,12 @@ def transcribe_translate_worker(
             # when that context has no punctuation, or it reinforces Whisper's drift
             # into never punctuating (see punctuated_context).
             context_prompt = punctuated_context(f"{recent_context} {sentence_buffer}")
+            whisper_size = settings.get_whisper_size()
             gen_at_start = reset_gen[0] if reset_gen is not None else seen_gen
+            transcribe_started = time.monotonic()
             result = mlx_whisper.transcribe(
                 temp_path,
-                path_or_hf_repo=whisper_model,
+                path_or_hf_repo=WHISPER_MODELS[whisper_size],
                 language=None if source_language == "auto" else source_language,
                 condition_on_previous_text=False,
                 initial_prompt=context_prompt,
@@ -1586,6 +2128,7 @@ def transcribe_translate_worker(
                 word_timestamps=word_timestamps,
                 verbose=False,
             )
+            maybe_log_slow("whisper", transcribe_started, f"size={whisper_size}")
             if reset_gen is not None and reset_gen[0] != gen_at_start:
                 # Clear was pressed while this chunk was inside Whisper — drop its result.
                 continue
@@ -1612,7 +2155,6 @@ def transcribe_translate_worker(
                 continue
             tail_history.append((now, text))
 
-            translator.set_target(target_language)
             if sentence_mode:
                 sentence_buffer = merge_partial_buffer(sentence_buffer, text)
                 if sentence_buffer and buffer_started_at is None:
@@ -1626,10 +2168,8 @@ def transcribe_translate_worker(
                 else:
                     emit_final_blocks(force=False)
             else:
-                translated = translator.translate(text)
-                if translated:
-                    overlay.post_pair(text, translated)
-                    note_context(text)
+                enqueue_translation(translation_q, sentence_case_text(text))
+                note_context(text)
         except Exception as exc:
             overlay.post_pair("", f"Ошибка: {exc}")
             time.sleep(1.0)
@@ -1638,22 +2178,112 @@ def transcribe_translate_worker(
                 Path(temp_path).unlink(missing_ok=True)
 
 
+def translation_worker(translation_q, overlay, translator, stop_event, settings, reset_gen=None):
+    seen_gen = reset_gen[0] if reset_gen is not None else 0
+    last_source = ""
+
+    def maybe_log_slow(label, started_at, extra=""):
+        elapsed = time.monotonic() - started_at
+        if elapsed >= SLOW_STEP_LOG_SECONDS:
+            suffix = f" {extra}" if extra else ""
+            print(f"[{label}] медленно: {elapsed:.1f}s{suffix}", file=sys.stderr)
+
+    while not stop_event.is_set():
+        if reset_gen is not None and reset_gen[0] != seen_gen:
+            seen_gen = reset_gen[0]
+            last_source = ""
+            while True:
+                try:
+                    translation_q.get_nowait()
+                except queue.Empty:
+                    break
+
+        if translation_q.maxsize and translation_q.qsize() >= translation_q.maxsize:
+            dropped = drain_queue_keep_latest(translation_q, TRANSLATION_QUEUE_KEEP_TASKS)
+            if dropped:
+                print(
+                    f"[translate] очередь перевода полная — сброшено {dropped}, беру свежие",
+                    file=sys.stderr,
+                )
+
+        try:
+            item = translation_q.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        if not isinstance(item, dict):
+            continue
+        source_text = str(item.get("source") or "").strip()
+        pause_ms = float(item.get("pause_ms") or 0.0)
+        task_source_language = str(item.get("source_language") or "").strip()
+        if not source_text:
+            continue
+
+        should_replace_tail = should_retranslate_merged_source(
+            last_source,
+            source_text,
+            pause_ms=pause_ms,
+        )
+        combined_source = (
+            f"{last_source.rstrip()} {source_text}".strip()
+            if should_replace_tail
+            else source_text
+        )
+
+        gen_at_start = reset_gen[0] if reset_gen is not None else seen_gen
+        source_language, target_language = settings.get()
+        translator.set_target(target_language)
+        # Prefer the source language resolved by the producer (Whisper detection); fall back
+        # to the configured one (possibly "auto") when the task didn't carry it.
+        translator.set_source(task_source_language or source_language)
+        translator.set_model(settings.get_ollama_model())
+        try:
+            translate_started = time.monotonic()
+            max_tokens = translation_token_budget(
+                combined_source,
+                getattr(translator, "max_tokens", 180),
+            )
+            translated = translator.translate(combined_source, max_tokens=max_tokens)
+            maybe_log_slow(
+                "translate",
+                translate_started,
+                f"model={settings.get_ollama_model()} chars={len(combined_source)} max_tokens={max_tokens}",
+            )
+            if reset_gen is not None and reset_gen[0] != gen_at_start:
+                continue
+            if translated:
+                overlay.post_pair(
+                    source_text,
+                    translated,
+                    pause_ms=pause_ms,
+                    replace_translation_tail=should_replace_tail,
+                    combined_source=combined_source,
+                )
+                last_source = combined_source
+        except Exception as exc:
+            overlay.post_pair("", f"Ошибка: {exc}")
+            time.sleep(1.0)
+
+
 def streaming_worker(
     audio_q,
+    translation_q,
     overlay,
     translator,
     stop_event,
     samplerate,
-    whisper_model,
     settings,
     min_block_chars,
     max_block_chars,
     max_sentences,
     endpoint_min_words,
+    endpointing_ms,
+    silence_rms=0.006,
     reset_gen=None,
     use_vad=True,
     vad_min_speech_ms=250.0,
     update_seconds=1.0,
+    block_seconds=0.2,
 ):
     """LocalAgreement-2 streaming transcription + translation."""
     import mlx_whisper
@@ -1663,6 +2293,8 @@ def streaming_worker(
     recent_context = ""   # fed to Whisper as initial_prompt
     detected_lang = "auto"  # Whisper's detected source language (for TranslateGemma)
     pending_seconds = 0.0
+    trailing_silence_ms = 0.0
+    endpoint_sent = False
     seen_gen = reset_gen[0] if reset_gen is not None else 0
     vad_model, get_speech_timestamps = load_vad() if use_vad else (None, None)
     fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="live_stream_")
@@ -1681,7 +2313,7 @@ def streaming_worker(
         context = punctuated_context(f"{recent_context} {committed_text}")
         result = mlx_whisper.transcribe(
             temp_path,
-            path_or_hf_repo=whisper_model,
+            path_or_hf_repo=WHISPER_MODELS[settings.get_whisper_size()],
             language=None if source_language == "auto" else source_language,
             condition_on_previous_text=False,
             initial_prompt=context,
@@ -1701,7 +2333,7 @@ def streaming_worker(
                     words.append((float(w.get("start", 0.0)), float(w.get("end", 0.0)), t))
         return words
 
-    def emit_sentences(force=False, pause_ms=0):
+    def emit_sentences(force=False, pause_ms=0.0):
         nonlocal committed_text
         committed_text = strip_hallucinations(committed_text)
         blocks, committed_text = take_blocks_for_translation(
@@ -1713,14 +2345,16 @@ def streaming_worker(
             )
             blocks += extra
         for block in blocks:
-            source_language, target_language = settings.get()
-            translator.set_target(target_language)
-            translator.set_source(detected_lang if source_language == "auto" else source_language)
+            source_language, _ = settings.get()
+            resolved_source = detected_lang if source_language == "auto" else source_language
             src = sentence_case_text(block)
-            translated = translator.translate(src)
-            if translated:
-                overlay.post_pair(src, translated, pause_ms=pause_ms)
-                note_context(src)
+            # Hand the block to the translation worker instead of blocking this audio-reader
+            # thread on Ollama; otherwise translation latency stalls transcription and the
+            # audio queue overflows.
+            enqueue_translation(
+                translation_q, src, pause_ms=pause_ms, source_language=resolved_source
+            )
+            note_context(src)
 
     while not stop_event.is_set():
         if reset_gen is not None and reset_gen[0] != seen_gen:
@@ -1729,6 +2363,8 @@ def streaming_worker(
             committed_text = ""
             recent_context = ""
             pending_seconds = 0.0
+            trailing_silence_ms = 0.0
+            endpoint_sent = False
             while True:
                 try:
                     audio_q.get_nowait()
@@ -1736,25 +2372,70 @@ def streaming_worker(
                     break
 
         # Catch-up: if transcription can't keep pace and the audio queue is piling up,
-        # skip the stale backlog and jump back to live (one gap beats a growing delay).
-        if audio_q.qsize() > 40:
+        # skip the stale backlog and jump back to live. Reset the rolling Whisper state
+        # too; otherwise it can keep re-transcribing stale buffered audio and never commit
+        # new translation blocks after overload.
+        if audio_q.qsize() > STREAM_CATCHUP_HIGH_WATER:
             dropped = 0
-            while audio_q.qsize() > 8:
+            while audio_q.qsize() > STREAM_CATCHUP_KEEP_BLOCKS:
                 try:
                     audio_q.get_nowait()
                     dropped += 1
                 except queue.Empty:
                     break
             if dropped:
-                print(f"[stream] отстаём — пропущено ~{dropped * 0.2:.1f}s аудио, догоняю", file=sys.stderr)
+                tail = proc.finalize()
+                if tail:
+                    committed_text = f"{committed_text} {tail}".strip()
+                    emit_sentences(force=True, pause_ms=dropped * block_seconds * 1000.0)
+                proc.reset()
+                pending_seconds = 0.0
+                print(
+                    f"[stream] отстаём — пропущено ~{dropped * block_seconds:.1f}s аудио, догоняю",
+                    file=sys.stderr,
+                )
+                overlay.post_status(audio_q.qsize())
 
         try:
             block = audio_q.get(timeout=0.2)
         except queue.Empty:
             continue
         try:
-            proc.insert_audio(block)
-            pending_seconds += len(block) / samplerate
+            force_endpoint_process = False
+            block_ms = len(block) / samplerate * 1000.0
+            block_rms = float(np.sqrt(np.mean(np.square(block.astype(np.float32)))))
+            if block_rms < silence_rms:
+                trailing_silence_ms += block_ms
+                if trailing_silence_ms >= endpointing_ms and not endpoint_sent:
+                    if proc.audio is not None and proc.active_seconds() > 0:
+                        force_endpoint_process = True
+                        pending_seconds = update_seconds
+                    else:
+                        tail = proc.finalize()
+                        if tail:
+                            committed_text = f"{committed_text} {tail}".strip()
+                        proc.drop_active()
+                        pending_seconds = 0.0
+                        endpoint_sent = True
+                        if committed_text.strip():
+                            emit_sentences(force=True, pause_ms=trailing_silence_ms)
+                        overlay.post_partial("")
+                if endpoint_sent and audio_q.qsize() > NO_SPEECH_KEEP_AUDIO_BLOCKS:
+                    drained = drain_queue_keep_latest(audio_q, NO_SPEECH_KEEP_AUDIO_BLOCKS)
+                    if drained:
+                        print(
+                            f"[stream] нет речи — сброшено ~{drained * block_ms / 1000.0:.1f}s тишины",
+                            file=sys.stderr,
+                        )
+                        overlay.post_status(audio_q.qsize())
+                if not force_endpoint_process:
+                    continue
+
+            if block_rms >= silence_rms:
+                trailing_silence_ms = 0.0
+                endpoint_sent = False
+                proc.insert_audio(block)
+                pending_seconds += len(block) / samplerate
             if pending_seconds < update_seconds:
                 continue
             pending_seconds = 0.0
@@ -1771,6 +2452,14 @@ def streaming_worker(
                     if tail:
                         committed_text = f"{committed_text} {tail}".strip()
                     proc.drop_active()
+                    pending_seconds = 0.0
+                    drained = drain_queue_keep_latest(audio_q, NO_SPEECH_KEEP_AUDIO_BLOCKS)
+                    if drained:
+                        print(
+                            f"[stream] нет речи — сброшено ~{drained * block_seconds:.1f}s аудио",
+                            file=sys.stderr,
+                        )
+                        overlay.post_status(audio_q.qsize())
                     if committed_text.strip():
                         emit_sentences(force=True, pause_ms=1000)  # pause => flush sentence
                     overlay.post_partial("")
@@ -1782,6 +2471,18 @@ def streaming_worker(
                 continue
             for (_, _, t) in committed:
                 committed_text = f"{committed_text} {t}".strip()
+
+            if force_endpoint_process:
+                tail = proc.finalize()
+                if tail:
+                    committed_text = f"{committed_text} {tail}".strip()
+                proc.drop_active()
+                endpoint_sent = True
+                if committed_text.strip():
+                    emit_sentences(force=True, pause_ms=trailing_silence_ms)
+                overlay.post_partial("")
+                overlay.post_status(audio_q.qsize())
+                continue
 
             emit_sentences(force=False)
 
@@ -1797,22 +2498,14 @@ def streaming_worker(
 
 
 def build_translator(args):
-    if args.translator == "ollama":
-        return OllamaTranslator(
-            model=args.ollama_model,
-            target=args.target,
-            url=args.ollama_url,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-            reasoning=args.reasoning,
-            source=args.source,
-        )
-    return MLXTranslator(
-        model_repo=args.mlx_llm,
+    return OllamaTranslator(
+        model=args.ollama_model,
         target=args.target,
+        url=args.ollama_url,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
         reasoning=args.reasoning,
+        source=args.source,
     )
 
 
@@ -1827,22 +2520,22 @@ def parse_args():
     p.add_argument(
         "--whisper",
         choices=WHISPER_MODELS.keys(),
-        default="large-v3",
-        help="модель транскрибации: large-v3 точнее, small/base быстрее",
+        default="medium",
+        help="MLX Whisper размер: small/medium/large",
     )
     p.add_argument(
         "--translator",
-        choices=("mlx", "ollama"),
-        default="mlx",
-        help="локальный backend перевода",
+        choices=("ollama",),
+        default="ollama",
+        help=argparse.SUPPRESS,
     )
-    p.add_argument("--ollama-model", default="qwen3.5:4b", help="модель Ollama")
-    p.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="адрес Ollama")
     p.add_argument(
-        "--mlx-llm",
-        default="mlx-community/Qwen3.5-4B-MLX-4bit",
-        help="MLX-LM repo на Hugging Face",
+        "--ollama-model",
+        choices=GEMMA_MODELS.keys(),
+        default="gemma4:12b-mlx",
+        help="модель Ollama Gemma 4",
     )
+    p.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="адрес Ollama")
     p.add_argument("--chunk-seconds", type=float, default=6.0, help="МАКС размер аудио-чанка (окна)")
     p.add_argument(
         "--min-chunk-seconds",
@@ -1890,10 +2583,19 @@ def parse_args():
     p.add_argument(
         "--audio-queue",
         type=int,
-        default=0,
-        help="буфер сырых аудио-блоков; 0 = без лимита (без потерь)",
+        default=DEFAULT_AUDIO_QUEUE_BLOCKS,
+        help=(
+            "буфер сырых аудио-блоков; при переполнении старое аудио пропускается, "
+            "чтобы перевод восстановился; 0 = без лимита"
+        ),
     )
     p.add_argument("--chunk-queue", type=int, default=8, help="буфер чанков на транскрибацию")
+    p.add_argument(
+        "--translation-queue",
+        type=int,
+        default=4,
+        help="буфер текстовых блоков на перевод; при переполнении старые задачи пропускаются",
+    )
     p.add_argument(
         "--no-sentence-mode",
         action="store_true",
@@ -1957,7 +2659,7 @@ def parse_args():
     p.add_argument(
         "--reasoning",
         action="store_true",
-        help="включить reasoning/thinking у Qwen; по умолчанию выключено",
+        help="включить reasoning/thinking у Ollama-модели; по умолчанию выключено",
     )
     p.add_argument("--width", type=int, default=1100, help="ширина окна")
     p.add_argument("--height", type=int, default=520, help="высота окна")
@@ -1990,20 +2692,25 @@ def main():
     info = sd.query_devices(device)
     samplerate = float(info["default_samplerate"])
     channels = min(2, int(info["max_input_channels"])) or 1
-    whisper_model = WHISPER_MODELS[args.whisper]
 
     stop_event = threading.Event()
     reset_gen = [0]  # bumped by the Clear button to wipe both workers' state
-    settings = LanguageSettings(args.source, args.target)
+    settings = LanguageSettings(
+        args.source,
+        args.target,
+        whisper_size=args.whisper,
+        ollama_model=args.ollama_model,
+    )
     min_block_chars = args.min_block_chars or args.min_sentence_chars
     audio_q = queue.Queue(maxsize=args.audio_queue)
     chunk_q = queue.Queue(maxsize=args.chunk_queue)
+    translation_q = queue.Queue(maxsize=args.translation_queue)
 
     print("Загружаю переводчик...")
     translator = build_translator(args)
     print(
         f"Старт: {info['name']} -> Whisper {args.whisper} -> "
-        f"{args.translator} -> {args.target}"
+        f"Ollama {args.ollama_model} -> {args.target}"
     )
 
     overlay = (
@@ -2020,11 +2727,17 @@ def main():
         )
     )
     overlay.reset_gen = reset_gen
+    overlay.translator = translator  # lets the model menu unload the old model immediately
 
     workers = [
         threading.Thread(
             target=audio_capture_worker,
             args=(audio_q, stop_event, device, samplerate, channels, args.block_seconds),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=translation_worker,
+            args=(translation_q, overlay, translator, stop_event, settings, reset_gen),
             daemon=True,
         ),
     ]
@@ -2054,11 +2767,10 @@ def main():
                 target=transcribe_translate_worker,
                 args=(
                     chunk_q,
+                    translation_q,
                     overlay,
-                    translator,
                     stop_event,
                     samplerate,
-                    whisper_model,
                     settings,
                     not args.no_sentence_mode,
                     args.flush_after,
@@ -2081,20 +2793,23 @@ def main():
                 target=streaming_worker,
                 args=(
                     audio_q,
+                    translation_q,
                     overlay,
                     translator,
                     stop_event,
                     samplerate,
-                    whisper_model,
                     settings,
                     min_block_chars,
                     args.max_block_chars,
                     args.max_sentences,
                     args.endpoint_min_words,
+                    args.endpointing_ms,
+                    args.silence_rms,
                     reset_gen,
                     not args.no_vad,
                     args.vad_min_speech_ms,
                     args.update_seconds,
+                    args.block_seconds,
                 ),
                 daemon=True,
             )
