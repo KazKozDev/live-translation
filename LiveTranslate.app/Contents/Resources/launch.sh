@@ -22,7 +22,7 @@ if [ -f "$RELATIVE/live_translate_overlay.py" ]; then
 elif [ -f "$CONFIG" ]; then
     PROJECT_DIR="$(cat "$CONFIG")"                # mode 2: fixed location from config
 else
-    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Не найден проект.\n\nЕсли .app лежит вне папки проекта, запусти один раз:\n  ./install-app.sh\nиз папки проекта — он пропишет путь."'
+    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Project not found.\n\nIf the .app is outside the project folder, run once:\n  ./install-app.sh\nfrom the project folder — it will record the path."'
     exit 1
 fi
 
@@ -31,11 +31,11 @@ SCRIPT="$PROJECT_DIR/live_translate_overlay.py"
 LOG="$PROJECT_DIR/live_translate_overlay.boot.log"
 
 if [ ! -f "$SCRIPT" ]; then
-    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Проект указан, но скрипт не найден:\n'"$SCRIPT"'\n\nПроверь путь в:\n~/Library/Application Support/LiveTranslate/project_dir"'
+    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Project is set but script not found:\n'"$SCRIPT"'\n\nCheck the path in:\n~/Library/Application Support/LiveTranslate/project_dir"'
     exit 1
 fi
 if [ ! -d "$PROJECT_DIR/live_translation" ]; then
-    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Проект указан, но пакет live_translation не найден:\n'"$PROJECT_DIR/live_translation"'\n\nОбнови проект целиком или повтори ./install-app.sh из актуальной папки проекта."'
+    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Project is set but live_translation package not found:\n'"$PROJECT_DIR/live_translation"'\n\nUpdate the full project or re-run ./install-app.sh from the current project folder."'
     exit 1
 fi
 
@@ -47,7 +47,7 @@ cd "$PROJECT_DIR" || exit 1
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 if [ ! -x "$PY" ]; then
-    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Не найден venv:\n'"$PY"'\n\nСоздай окружение и установи зависимости (./setup.sh)."'
+    /usr/bin/osascript -e 'display alert "LiveTranslate" message "venv not found:\n'"$PY"'\n\nCreate the environment and install dependencies (./setup.sh)."'
     exit 1
 fi
 

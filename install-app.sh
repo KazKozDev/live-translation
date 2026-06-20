@@ -21,35 +21,35 @@ CONFIG_DIR="$HOME/Library/Application Support/LiveTranslate"
 CONFIG="$CONFIG_DIR/project_dir"
 
 if [ ! -d "$APP" ]; then
-    echo "Ошибка: $APP не найден рядом со скриптом ($PROJECT_DIR)." >&2
+    echo "Error: $APP not found next to the script ($PROJECT_DIR)." >&2
     exit 1
 fi
 if [ ! -f "$PROJECT_DIR/live_translate_overlay.py" ]; then
-    echo "Ошибка: запусти скрипт из папки проекта (нет live_translate_overlay.py)." >&2
+    echo "Error: run the script from the project folder (live_translate_overlay.py not found)." >&2
     exit 1
 fi
 if [ ! -d "$PROJECT_DIR/live_translation" ]; then
-    echo "Ошибка: запусти скрипт из полной папки проекта (нет live_translation/)." >&2
+    echo "Error: run the script from the full project folder (live_translation/ not found)." >&2
     exit 1
 fi
 
-echo "==> 1/3  Записываю путь к проекту в конфиг"
+echo "==> 1/3  Writing project path to config"
 mkdir -p "$CONFIG_DIR"
 printf '%s\n' "$PROJECT_DIR" > "$CONFIG"
 echo "    $CONFIG -> $PROJECT_DIR"
 
-echo "==> 2/3  Копирую $APP в $DEST"
+echo "==> 2/3  Copying $APP to $DEST"
 rm -rf "$DEST/$APP"
 cp -R "$APP" "$DEST/$APP"
 
-echo "==> 3/3  Переподписываю (ad-hoc) копию в $DEST"
+echo "==> 3/3  Re-signing (ad-hoc) the copy in $DEST"
 # Resources changed across the copy boundary; re-seal so LaunchServices runs it.
 codesign --force --deep -s - "$DEST/$APP"
-codesign --verify --deep --strict "$DEST/$APP" && echo "    подпись ок"
+codesign --verify --deep --strict "$DEST/$APP" && echo "    signature ok"
 
 echo ""
-echo "Готово. $DEST/$APP теперь запускает проект из:"
+echo "Done. $DEST/$APP now launches the project from:"
 echo "    $PROJECT_DIR"
 echo ""
-echo "Если переедешь проект — повтори ./install-app.sh из нового места"
-echo "(или поправь путь в $CONFIG)."
+echo "If you move the project, re-run ./install-app.sh from the new location"
+echo "(or update the path in $CONFIG)."

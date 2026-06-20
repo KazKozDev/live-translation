@@ -101,11 +101,11 @@ class OllamaTranslator:
                 done_reason = body.get("done_reason")
                 if done_reason not in (None, "unload"):
                     print(
-                        f"[translate] Ollama не подтвердил выгрузку {model}: {done_reason}",
+                        f"[translate] Ollama did not confirm unload of {model}: {done_reason}",
                         file=sys.stderr,
                     )
         except urllib.error.URLError as exc:
-            print(f"[translate] не удалось выгрузить {model}: {exc}", file=sys.stderr)
+            print(f"[translate] failed to unload {model}: {exc}", file=sys.stderr)
 
     def unload_models_except(self, models, keep_model):
         for model in models:
@@ -160,7 +160,7 @@ class OllamaTranslator:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.URLError as exc:
             raise RuntimeError(
-                "Ollama не отвечает. Запусти `ollama serve` и скачай модель: "
+                "Ollama is not responding. Run `ollama serve` and pull the model: "
                 f"`ollama pull {self.model}`."
             ) from exc
         if self.translategemma and self.source and self.source != "auto":
@@ -195,7 +195,7 @@ class MLXTranslator:
                 from mlx_lm import generate, load
                 from mlx_lm.sample_utils import make_sampler
             except ImportError as exc:
-                raise RuntimeError("Для --translator mlx установи `pip install mlx-lm`.") from exc
+                raise RuntimeError("For --translator mlx install `pip install mlx-lm`.") from exc
             self.generate = generate
             self.make_sampler = make_sampler
             loaded = load(self.model_repo)
