@@ -9,12 +9,11 @@ import urllib.request
 from live_translation.text_pipeline import (
     live_translation_messages,
     strip_llm_noise,
-    translategemma_prompt,
 )
 
 
 class LanguageSettings:
-    def __init__(self, source, target, whisper_size="medium", ollama_model="gemma4:26b-mlx"):
+    def __init__(self, source, target, whisper_size="turbo", ollama_model="gemma4:26b-mlx"):
         self._lock = threading.Lock()
         self._source = source
         self._target = target
@@ -25,11 +24,11 @@ class LanguageSettings:
         with self._lock:
             return self._source, self._target
 
-    def get_whisper_size(self):
+    def get_whisper_size(self) -> str:
         with self._lock:
             return self._whisper_size
 
-    def get_ollama_model(self):
+    def get_ollama_model(self) -> str:
         with self._lock:
             return self._ollama_model
 
@@ -71,7 +70,6 @@ class OllamaTranslator:
         self.temperature = temperature
         self.reasoning = reasoning
         self.num_ctx = num_ctx
-        self.translategemma = "translategemma" in model.lower() or "translate-gemma" in model.lower()
 
     def set_model(self, model):
         if model and model != self.model:
@@ -79,7 +77,6 @@ class OllamaTranslator:
             # Ollama keep it resident for keep_alive minutes (which would hold both the old
             # and the new model in memory at once). The new model loads on the next translate.
             previous, self.model = self.model, model
-            self.translategemma = "translategemma" in model.lower() or "translate-gemma" in model.lower()
             if previous and previous != model:
                 self._unload(previous)
 
@@ -128,29 +125,17 @@ class OllamaTranslator:
         }
         if self.num_ctx:
             options["num_ctx"] = int(self.num_ctx)
-        if self.translategemma and self.source and self.source != "auto":
-            prompt = translategemma_prompt(self.source, self.target, text)
-            payload = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "keep_alive": "30m",
-                "options": options,
-            }
-            url = self.generate_url
-        else:
-            payload = {
-                "model": self.model,
-                "messages": live_translation_messages(self.source, self.target, text),
-                "stream": False,
-                "think": bool(self.reasoning),
-                "keep_alive": "30m",
-                "options": options,
-            }
-            url = self.chat_url
+        payload = {
+            "model": self.model,
+            "messages": live_translation_messages(self.source, self.target, text),
+            "stream": False,
+            "think": bool(self.reasoning),
+            "keep_alive": "30m",
+            "options": options,
+        }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            url,
+            self.chat_url,
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -163,86 +148,5 @@ class OllamaTranslator:
                 "Ollama is not responding. Run `ollama serve` and pull the model: "
                 f"`ollama pull {self.model}`."
             ) from exc
-        if self.translategemma and self.source and self.source != "auto":
-            response = body.get("response", "")
-        else:
-            response = body.get("message", {}).get("content", "")
+        response = body.get("message", {}).get("content", "")
         return strip_llm_noise(response)
-
-
-class MLXTranslator:
-    def __init__(self, model_repo, target, max_tokens, temperature, reasoning=False, source="auto"):
-        # mlx_lm uses thread-local GPU streams, so import/load on the worker thread.
-        self.model_repo = model_repo
-        self.target = target
-        self.source = source
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.reasoning = reasoning
-        self.model = None
-        self.tokenizer = None
-        self.generate = None
-        self.make_sampler = None
-        self._load_lock = threading.Lock()
-
-    def _ensure_loaded(self):
-        if self.model is not None:
-            return
-        with self._load_lock:
-            if self.model is not None:
-                return
-            try:
-                from mlx_lm import generate, load
-                from mlx_lm.sample_utils import make_sampler
-            except ImportError as exc:
-                raise RuntimeError("For --translator mlx install `pip install mlx-lm`.") from exc
-            self.generate = generate
-            self.make_sampler = make_sampler
-            loaded = load(self.model_repo)
-            self.model, self.tokenizer = loaded[0], loaded[1]
-
-    def set_target(self, target):
-        self.target = target
-
-    def set_source(self, source):
-        self.source = source
-
-    def translate(self, text, max_tokens=None):
-        self._ensure_loaded()
-        max_tokens = int(max_tokens or self.max_tokens)
-        model, tokenizer = self.model, self.tokenizer
-        generate, make_sampler = self.generate, self.make_sampler
-        assert (
-            model is not None
-            and tokenizer is not None
-            and generate is not None
-            and make_sampler is not None
-        ), "MLX translator not loaded"
-        messages = live_translation_messages(self.source, self.target, text)
-        if hasattr(tokenizer, "apply_chat_template"):
-            try:
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=self.reasoning,
-                )
-            except TypeError:
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-        else:
-            system, user = messages
-            prompt = f"{system['content']}\n\nUser:\n{user['content']}\n\nAssistant:\n"
-
-        out = generate(
-            model,
-            tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            sampler=make_sampler(temp=self.temperature, top_p=0.8),
-            verbose=False,
-        )
-        return strip_llm_noise(out)

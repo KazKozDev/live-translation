@@ -22,11 +22,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "live_translate_overlay.py" = ["B007", "B023", "SIM102", "SIM105", "SIM108"]
-"record_and_transcribe.py" = ["B007", "SIM117"]
 
 [tool.pyright]
 pythonVersion = "3.12"
-include = ["live_translation", "live_translate_overlay.py", "record_and_transcribe.py", "tests"]
+include = ["live_translation", "live_translate_overlay.py", "tests"]
 reportAttributeAccessIssue = false
 reportMissingImports = false
 reportMissingModuleSource = false

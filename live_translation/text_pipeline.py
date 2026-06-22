@@ -87,54 +87,6 @@ def live_translation_messages(src_code, tgt_code, text):
     ]
 
 
-_TG_EXTRA_NAMES = {
-    "ca": "Catalan",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "ar": "Arabic",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "tr": "Turkish",
-    "sv": "Swedish",
-    "cs": "Czech",
-    "el": "Greek",
-    "ro": "Romanian",
-    "hu": "Hungarian",
-    "fi": "Finnish",
-    "da": "Danish",
-    "no": "Norwegian",
-    "he": "Hebrew",
-    "hi": "Hindi",
-    "id": "Indonesian",
-    "vi": "Vietnamese",
-    "th": "Thai",
-    "gl": "Galician",
-    "eu": "Basque",
-}
-
-
-def _tg_name(code):
-    code = (code or "").lower()
-    return LANG_NAMES.get(code) or _TG_EXTRA_NAMES.get(code) or (code.upper() if code else "the language")
-
-
-def _tg_code(code):
-    return {"zh": "zh-Hans"}.get((code or "").lower(), (code or "").lower())
-
-
-def translategemma_prompt(src_code, tgt_code, text):
-    """Official TranslateGemma prompt with its required blank-line spacing."""
-    sname, scode = _tg_name(src_code), _tg_code(src_code)
-    tname, tcode = _tg_name(tgt_code), _tg_code(tgt_code)
-    return (
-        f"You are a professional {sname} ({scode}) to {tname} ({tcode}) translator. "
-        f"Your goal is to accurately convey the meaning and nuances of the original {sname} "
-        f"text while adhering to {tname} grammar, vocabulary, and cultural sensitivities.\n"
-        f"Produce only the {tname} translation, without any additional explanations or "
-        f"commentary. Please translate the following {sname} text into {tname}:\n\n\n{text}\n"
-    )
-
-
 HALLUCINATION_PATTERNS = [
     r"¡?\s*gracias\s*!?",
     r"muchas\s+gracias",

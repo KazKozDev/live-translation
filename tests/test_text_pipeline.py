@@ -10,7 +10,6 @@ from live_translation.text_pipeline import (
     take_blocks_for_translation,
     take_confirmed_blocks_for_translation,
     take_endpoint_blocks,
-    translategemma_prompt,
 )
 
 
@@ -140,12 +139,6 @@ def test_endpoint_blocks_emit_punctuationless_utterance():
 def test_punctuated_context_drops_long_unpunctuated_tail():
     assert punctuated_context("A stable sentence. " + "tail " * 30) is None
     assert punctuated_context("A stable sentence. short tail") == "A stable sentence. short tail"
-
-
-def test_translategemma_prompt_uses_language_names_and_codes():
-    prompt = translategemma_prompt("es", "zh", "hola")
-    assert "Spanish (es) to Chinese (zh-Hans)" in prompt
-    assert prompt.endswith("\n\n\nhola\n")
 
 
 def test_last_word_end_seconds_reads_nested_whisper_result():

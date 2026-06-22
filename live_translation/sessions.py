@@ -165,7 +165,7 @@ def session_summary(session, source_labels=None, target_labels=None, whisper_lab
     return f"{time_label}, {source} -> {target}, {minutes} min, {whisper} / {gemma}"
 
 
-def export_txt(session):
+def export_txt(session, transcript_title="TRANSCRIPTION", translation_title="TRANSLATION"):
     original = []
     translated = []
     for phrase in session.get("phrases") or []:
@@ -176,9 +176,9 @@ def export_txt(session):
         if translation:
             translated.append(translation)
     return (
-        "TRANSCRIPTION\n\n"
+        f"{transcript_title}\n\n"
         + "\n\n".join(original)
-        + "\n\n\nTRANSLATION\n\n"
+        + f"\n\n\n{translation_title}\n\n"
         + "\n\n".join(translated)
         + "\n"
     )

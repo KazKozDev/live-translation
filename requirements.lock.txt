@@ -18,7 +18,6 @@ markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
 mlx==0.31.2
-mlx-lm==0.31.3
 mlx-metal==0.31.2
 mlx-whisper==0.4.3
 more-itertools==11.1.0

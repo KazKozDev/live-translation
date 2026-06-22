@@ -9,7 +9,7 @@ semi-transparent macOS window with a frosted-glass effect.
 Quick start:
 
     brew install blackhole-2ch ffmpeg
-    pip install mlx-whisper mlx-lm sounddevice soundfile numpy pyobjc-framework-Cocoa
+    pip install mlx-whisper sounddevice soundfile numpy pyobjc-framework-Cocoa
 
     ./live_translate_overlay.py --target ru
 
@@ -19,8 +19,8 @@ Translation via Ollama Gemma 4 by default:
     ollama pull gemma4:26b-mlx
     ./live_translate_overlay.py --ollama-model gemma4:26b-mlx
 
-Audio setup is the same as in record_and_transcribe.py:
-Multi-Output Device = your headphones/speakers + BlackHole 2ch.
+Audio setup: create a Multi-Output Device
+(your headphones/speakers + BlackHole 2ch) and select it as system output.
 """
 
 import argparse
@@ -43,6 +43,7 @@ import soundfile as sf
 from live_translation.sessions import (
     SessionStore,
     export_subtitles,
+    export_txt,
     new_session,
     session_summary,
 )
@@ -292,7 +293,7 @@ def _glass_pdf_view_class():
 
 
 class GlassOverlay:
-    def __init__(self, stop_event, settings, title, width, height, opacity, show_partial=False):
+    def __init__(self, stop_event, settings: LanguageSettings, title, width, height, opacity, show_partial=False):
         try:
             from Cocoa import (
                 NSApp,
@@ -1534,14 +1535,6 @@ class GlassOverlay:
         except Exception:
             print(f"[{title}] {message}", file=sys.stderr)
 
-    def _history_section_text(self, key):
-        blocks = []
-        for pair in self.history_pairs:
-            text = str(pair.get(key) or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-            if text:
-                blocks.append(text)
-        return "\n\n".join(blocks)
-
     def _txt_section_title(self, code, section):
         code = (code or "auto").lower()
         idx = 0 if section == "transcript" else 1
@@ -1569,9 +1562,8 @@ class GlassOverlay:
             self._notify("Nothing to save", "No translated text yet.")
             return
 
-        transcript = self._history_section_text("source")
-        translation = self._history_section_text("translated")
-        if not transcript and not translation:
+        session = self._session_from_history_pairs()
+        if not session.get("phrases"):
             self._notify("Nothing to save", "No text for TXT yet.")
             return
 
@@ -1588,13 +1580,10 @@ class GlassOverlay:
         path = panel.URL().path()
 
         _source_code, target_code = self.settings.get()
-        transcript_title = self._txt_transcript_title()
-        translation_title = self._txt_section_title(target_code, "translation")
-        content = (
-            f"{transcript_title}\n\n"
-            f"{transcript}\n\n\n"
-            f"{translation_title}\n\n"
-            f"{translation}\n"
+        content = export_txt(
+            session,
+            transcript_title=self._txt_transcript_title(),
+            translation_title=self._txt_section_title(target_code, "translation"),
         )
         ok = False
         try:
@@ -2523,7 +2512,7 @@ def enqueue_translation(
     }
     if source_language:
         # Resolved source language (e.g. Whisper's detected language in auto mode), so the
-        # translator doesn't have to fall back to "auto" — matters for TranslateGemma.
+        # prompt names a concrete source instead of "auto" and the transcript is labelled right.
         task["source_language"] = source_language
     if start_seconds is not None:
         task["start_seconds"] = float(start_seconds)
@@ -3002,7 +2991,6 @@ def transcribe_translate_worker(
     samplerate,
     settings,
     sentence_mode,
-    flush_after,
     min_block_chars,
     max_block_chars,
     max_sentences,
@@ -3225,7 +3213,7 @@ def transcribe_translate_worker(
                     trailing_silence_ms = max(trailing_silence_ms, word_gap_ms)
                     is_endpoint = is_endpoint or trailing_silence_ms >= endpointing_ms
 
-            text = re.sub(r"\s+", " ", result.get("text", "")).strip()
+            text = re.sub(r"\s+", " ", str(result.get("text", ""))).strip()
             text = strip_hallucinations(text)
             if len(text) < 2:
                 continue
@@ -3428,7 +3416,7 @@ def streaming_worker(
     proc = OnlineProcessor(samplerate)
     committed_text = ""   # confirmed words not yet emitted as a full sentence
     recent_context = ""   # fed to Whisper as initial_prompt
-    detected_lang = "auto"  # Whisper's detected source language (for TranslateGemma)
+    detected_lang = "auto"  # Whisper's detected source language (labels phrases / prompt source)
     active_whisper_repo = None
     pending_seconds = 0.0
     trailing_silence_ms = 0.0
@@ -3706,12 +3694,6 @@ def parse_args():
         help="MLX Whisper size: small/medium/turbo/large",
     )
     p.add_argument(
-        "--translator",
-        choices=("ollama",),
-        default="ollama",
-        help=argparse.SUPPRESS,
-    )
-    p.add_argument(
         "--ollama-model",
         choices=GEMMA_MODELS.keys(),
         default="gemma4:26b-mlx",
@@ -3783,18 +3765,6 @@ def parse_args():
         help="translate each recognised chunk immediately without waiting for sentence end",
     )
     p.add_argument(
-        "--flush-after",
-        type=float,
-        default=0.0,
-        help="legacy fallback; endpointing-ms is the primary finalisation mechanism",
-    )
-    p.add_argument(
-        "--min-sentence-chars",
-        type=int,
-        default=20,
-        help="compat: if --min-block-chars is unset, used as block minimum",
-    )
-    p.add_argument(
         "--min-block-chars",
         type=int,
         default=90,
@@ -3826,8 +3796,17 @@ def parse_args():
     )
     p.add_argument(
         "--legacy-chunking",
+        dest="legacy_chunking",
         action="store_true",
-        help="legacy chunking instead of LocalAgreement streaming",
+        default=True,
+        help=argparse.SUPPRESS,  # now the default; kept so the .app launcher's flag still works
+    )
+    p.add_argument(
+        "--streaming",
+        dest="legacy_chunking",
+        action="store_false",
+        help="use LocalAgreement streaming (smoother, but lossy under load); "
+        "default is the lossless chunker",
     )
     p.add_argument(
         "--update-seconds",
@@ -3876,7 +3855,7 @@ def main():
             )
         print(f"Found device: [{device}] {name}")
 
-    info = sd.query_devices(device)
+    info = cast(dict, sd.query_devices(device))
     samplerate = float(info["default_samplerate"])
     channels = min(2, int(info["max_input_channels"])) or 1
 
@@ -3888,7 +3867,7 @@ def main():
         whisper_size=args.whisper,
         ollama_model=args.ollama_model,
     )
-    min_block_chars = args.min_block_chars or args.min_sentence_chars
+    min_block_chars = args.min_block_chars
     audio_q = queue.Queue(maxsize=args.audio_queue)
     chunk_q = queue.Queue(maxsize=args.chunk_queue)
     translation_q = queue.Queue(maxsize=args.translation_queue)
@@ -3959,7 +3938,6 @@ def main():
                     samplerate,
                     settings,
                     not args.no_sentence_mode,
-                    args.flush_after,
                     min_block_chars,
                     args.max_block_chars,
                     args.max_sentences,
