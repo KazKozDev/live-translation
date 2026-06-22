@@ -2621,7 +2621,31 @@ def _to_mono_16k(audio, samplerate):
     return tensor
 
 
-def vad_analyze(audio, samplerate, vad_model, get_speech_timestamps, min_keep_frames, min_speech_ms=250.0):
+def _to_mono_16k_np(audio, samplerate):
+    """float32 mono 16 kHz numpy array — the form mlx_whisper.transcribe accepts
+    directly, so we can skip writing a temp WAV and let mlx re-decode/resample it."""
+    return np.ascontiguousarray(_to_mono_16k(audio, samplerate).numpy(), dtype=np.float32)
+
+
+def whisper_audio_source(audio, samplerate, temp_path=None):
+    """Return audio for mlx_whisper.transcribe. Prefer an in-memory float32 mono
+    16 kHz array (skips the temp-WAV write + ffmpeg decode + resample mlx would do
+    on a file). On any failure, fall back to a WAV: reuse `temp_path` if given,
+    otherwise mkstemp a new one the caller must unlink. Returns (input, temp_path),
+    where temp_path is the path to clean up (None when the array path was used)."""
+    try:
+        return _to_mono_16k_np(audio, samplerate), None
+    except Exception:
+        owned = None
+        if temp_path is None:
+            fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="live_translate_")
+            os.close(fd)
+            owned = temp_path
+        sf.write(temp_path, audio, int(samplerate), subtype="PCM_16")
+        return temp_path, owned
+
+
+def vad_analyze(audio, samplerate, vad_model, get_speech_timestamps, min_keep_frames, min_speech_ms=250.0, prepared_wav=None):
     """Analyze a chunk with Silero VAD. Returns (has_speech, cut):
     - has_speech: whether enough *real* speech was detected. We require the total speech
       duration to reach min_speech_ms — a stray blip/noise that Silero marks as a tiny
@@ -2630,7 +2654,14 @@ def vad_analyze(audio, samplerate, vad_model, get_speech_timestamps, min_keep_fr
       last speech (never mid-word), or None to keep the fixed-size cut.
     On any error returns (True, None) so the caller falls back to the RMS gate."""
     try:
-        wav = _to_mono_16k(audio, samplerate)
+        if prepared_wav is not None:
+            # Already resampled to 16 kHz mono this pass (shared with Whisper). Wrap the
+            # numpy view as a torch tensor for Silero — zero-copy, no second resample.
+            import torch
+
+            wav = torch.from_numpy(prepared_wav)
+        else:
+            wav = _to_mono_16k(audio, samplerate)
         timestamps = get_speech_timestamps(wav, vad_model, sampling_rate=16000)
     except Exception:
         return True, None
@@ -2739,9 +2770,9 @@ class OnlineProcessor:
             w for w in self.hyp.committed_in_buffer if w[1] >= t - 30
         ]
 
-    def process(self, transcribe_words_fn):
+    def process(self, transcribe_words_fn, prepared=None):
         """Returns (committed_words, draft_text)."""
-        words = transcribe_words_fn(self.audio)
+        words = transcribe_words_fn(self.audio, prepared)
         self.hyp.insert(words, self.buffer_offset)
         committed = self.hyp.flush()
         if committed:
@@ -3160,9 +3191,7 @@ def transcribe_translate_worker(
 
         temp_path = None
         try:
-            fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="live_translate_")
-            os.close(fd)
-            sf.write(temp_path, audio, int(samplerate), subtype="PCM_16")
+            whisper_input, temp_path = whisper_audio_source(audio, samplerate)
             source_language, target_language = settings.get()
             # Feed the recently finalized text as initial_prompt: gives cross-chunk
             # context (punctuation, casing, word continuity at boundaries) without the
@@ -3182,7 +3211,7 @@ def transcribe_translate_worker(
             gen_at_start = reset_gen[0] if reset_gen is not None else seen_gen
             transcribe_started = time.monotonic()
             result = mlx_whisper.transcribe(
-                temp_path,
+                whisper_input,
                 path_or_hf_repo=whisper_repo,
                 language=None if source_language == "auto" else source_language,
                 condition_on_previous_text=False,
@@ -3190,7 +3219,7 @@ def transcribe_translate_worker(
                 no_speech_threshold=0.6,
                 compression_ratio_threshold=2.4,
                 logprob_threshold=-1.0,
-                temperature=(0.0, 0.2, 0.4),
+                temperature=(0.0, 0.2),
                 word_timestamps=word_timestamps,
                 verbose=False,
             )
@@ -3435,7 +3464,7 @@ def streaming_worker(
         if text:
             recent_context = f"{recent_context} {text}".strip()[-240:]
 
-    def transcribe_words(audio):
+    def transcribe_words(audio, prepared=None):
         nonlocal active_whisper_repo, detected_lang
         source_language, _ = settings.get()
         whisper_size = settings.get_whisper_size()
@@ -3447,10 +3476,16 @@ def streaming_worker(
                 f"Loading {WHISPER_LABELS.get(whisper_size, 'Whisper')}...",
                 alpha=0.78,
             )
-        sf.write(temp_path, audio, int(samplerate), subtype="PCM_16")
+        # `prepared` is the float32 mono 16 kHz array already computed for VAD this
+        # pass — reuse it so we resample the rolling buffer once, not twice. Skips the
+        # temp-WAV write + mlx's ffmpeg decode/resample too.
+        if prepared is not None:
+            whisper_input = prepared
+        else:
+            whisper_input, _ = whisper_audio_source(audio, samplerate, temp_path)
         context = punctuated_context(f"{recent_context} {committed_text}")
         result = mlx_whisper.transcribe(
-            temp_path,
+            whisper_input,
             path_or_hf_repo=whisper_repo,
             language=None if source_language == "auto" else source_language,
             condition_on_previous_text=False,
@@ -3603,10 +3638,20 @@ def streaming_worker(
                 continue
             pending_seconds = 0.0
 
+            # Resample the rolling buffer to 16 kHz mono once per pass and share it with
+            # both the VAD speech-gate and Whisper below — they both need exactly this.
+            prepared = None
+            if proc.audio is not None:
+                try:
+                    prepared = _to_mono_16k_np(proc.audio, samplerate)
+                except Exception:
+                    prepared = None
+
             # Skip pure silence/non-speech: don't re-transcribe it (hallucination source).
             if vad_model is not None and proc.audio is not None:
                 has_speech, _ = vad_analyze(
-                    proc.audio, samplerate, vad_model, get_speech_timestamps, 0, vad_min_speech_ms
+                    proc.audio, samplerate, vad_model, get_speech_timestamps, 0,
+                    vad_min_speech_ms, prepared_wav=prepared,
                 )
                 if not has_speech:
                     # Commit the still-unconfirmed tail before dropping the audio, otherwise
@@ -3629,7 +3674,7 @@ def streaming_worker(
                     continue
 
             gen_before = reset_gen[0] if reset_gen is not None else seen_gen
-            committed, draft = proc.process(transcribe_words)
+            committed, draft = proc.process(transcribe_words, prepared=prepared)
             if reset_gen is not None and reset_gen[0] != gen_before:
                 continue
             for (_, _, t) in committed:
