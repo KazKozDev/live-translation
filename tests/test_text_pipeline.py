@@ -145,6 +145,21 @@ def test_split_complete_sentences_keeps_incomplete_tail():
     assert rest == "Three still going"
 
 
+def test_split_complete_sentences_merges_ellipsis_into_next():
+    sentences, rest = split_complete_sentences(
+        "There are some… problems with this. And more.", 1
+    )
+    assert sentences == ["There are some… problems with this.", "And more."]
+    assert rest == ""
+
+
+def test_split_complete_sentences_holds_trailing_ellipsis_fragment():
+    # No following sentence yet -> the ellipsis fragment stays buffered, not emitted alone.
+    sentences, rest = split_complete_sentences("First done. There are some…", 1)
+    assert sentences == ["First done."]
+    assert rest == "There are some…"
+
+
 def test_take_blocks_for_translation_respects_sentence_limit():
     blocks, remaining = take_blocks_for_translation(
         "One sentence. Two sentence. Three sentence.",

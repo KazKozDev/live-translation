@@ -234,6 +234,14 @@ def _sentence_end_matches(text):
     return list(re.finditer(r"(?<!\.)[.!?](?!\.)(?:[\"')\]]+)?(?=\s|$)|…(?:[\"')\]]+)?(?=\s|$)", text))
 
 
+# An ellipsis ('…' or two-plus dots) ends a sentence that trails off into the next one.
+_ELLIPSIS_END_RE = re.compile(r"(?:\.{2,}|…)[\"')\]]*\s*$")
+
+
+def ends_with_ellipsis(text):
+    return bool(_ELLIPSIS_END_RE.search(str(text or "")))
+
+
 def merge_overlap_text(previous_tail, incoming, min_overlap=12, max_overlap=120):
     incoming = re.sub(r"\s+", " ", incoming).strip()
     previous_tail = re.sub(r"\s+", " ", previous_tail).strip()
@@ -310,15 +318,28 @@ def split_complete_sentences(buffer, min_sentence_chars):
     rest = text[cut:].strip()
     sentences = []
     start = 0
+    pending = ""  # an ellipsis-terminated sentence trails into the next — hold it back
     for match in _sentence_end_matches(complete):
         sentence = complete[start : match.end()].strip()
         start = match.end()
+        if pending:
+            sentence = f"{pending} {sentence}".strip()
+            pending = ""
+        # Keep an ellipsis phrase glued to the following sentence so the translator sees
+        # the whole thought, not a dangling fragment translated on its own.
+        if ends_with_ellipsis(sentence):
+            pending = sentence
+            continue
         if len(sentence) >= min_sentence_chars:
             sentences.append(sentence)
         elif sentences:
             sentences[-1] = f"{sentences[-1]} {sentence}".strip()
         elif sentence:
             sentences.append(sentence)
+    if pending:
+        # No following sentence yet — keep the ellipsis fragment buffered (in `rest`) so it
+        # merges with what comes next instead of being emitted alone.
+        rest = f"{pending} {rest}".strip()
     return sentences, rest
 
 
