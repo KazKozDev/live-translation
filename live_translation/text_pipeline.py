@@ -452,3 +452,43 @@ def last_word_end_seconds(result):
             if end is not None:
                 last_end = float(end)
     return last_end
+
+
+def absolute_words(result, offset_seconds):
+    """Flatten a Whisper result into (start, end, text) tuples with timestamps shifted to
+    the global timeline by offset_seconds (the chunk's start time)."""
+    words = []
+    base = float(offset_seconds or 0.0)
+    for segment in result.get("segments", []):
+        for word in segment.get("words", []) or []:
+            text = (word.get("word") or "").strip()
+            if not text:
+                continue
+            start = base + float(word.get("start", 0.0))
+            end = base + float(word.get("end", start))
+            words.append((start, end, text))
+    return words
+
+
+def dedup_words_by_time(words, committed_until):
+    """Drop words already covered by a previous overlapping chunk, by time rather than
+    spelling. `words` is (start, end, text) tuples on the global timeline. A word is kept
+    when its midpoint falls after `committed_until` (the end time of the last accepted
+    word); duplicates re-transcribed in the overlap region sit before it and are dropped.
+    Because it compares time, it removes overlaps that text matching misses — inflection
+    changes ('непреодолимая'/'преодолимое') and words split across the seam.
+
+    Returns (kept_text, new_committed_until). The boundary advances to the latest word end
+    seen, so the next chunk dedups against full coverage."""
+    kept = []
+    max_end = committed_until
+    for start, end, text in words:
+        text = (text or "").strip()
+        if not text:
+            continue
+        midpoint = (float(start) + float(end)) / 2.0
+        if committed_until is None or midpoint > committed_until:
+            kept.append(text)
+        if max_end is None or end > max_end:
+            max_end = float(end)
+    return " ".join(kept), max_end

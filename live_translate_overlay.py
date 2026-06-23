@@ -51,6 +51,8 @@ from live_translation.text_pipeline import (
     LANG_MENU,
     WAITING_ORIGINAL,
     WAITING_TRANSLATION,
+    absolute_words,
+    dedup_words_by_time,
     language_label,
     last_word_end_seconds,
     merge_overlap_text,
@@ -3100,6 +3102,7 @@ def transcribe_translate_worker(
     buffer_end_seconds = None
     recent_context = ""  # last committed/emitted text, fed to Whisper as initial_prompt
     active_whisper_repo = None
+    committed_until_seconds = None  # global time covered so far, for time-based seam dedup
     seen_gen = reset_gen[0] if reset_gen is not None else 0
 
     def maybe_log_slow(label, started_at, extra=""):
@@ -3196,6 +3199,7 @@ def transcribe_translate_worker(
             buffer_start_seconds = None
             buffer_end_seconds = None
             recent_context = ""
+            committed_until_seconds = None
             if active_whisper_repo:
                 release_mlx_whisper_model(active_whisper_repo)
                 active_whisper_repo = None
@@ -3299,7 +3303,25 @@ def transcribe_translate_worker(
                     trailing_silence_ms = max(trailing_silence_ms, word_gap_ms)
                     is_endpoint = is_endpoint or trailing_silence_ms >= endpointing_ms
 
-            text = re.sub(r"\s+", " ", str(result.get("text", ""))).strip()
+            # Time-based seam dedup: when this chunk overlaps the previously covered audio
+            # (only on mid-speech cuts now), drop the re-transcribed overlap words by their
+            # timestamps instead of by spelling — this catches inflection changes and
+            # split words that text matching misses. On a clean cut the timeline is
+            # contiguous, so nothing is dropped and we keep Whisper's well-formed text.
+            abs_words = absolute_words(result, item_start_seconds) if word_timestamps else []
+            if abs_words:
+                overlap_present = (
+                    committed_until_seconds is not None
+                    and item_start_seconds is not None
+                    and float(item_start_seconds) < committed_until_seconds
+                )
+                deduped_text, committed_until_seconds = dedup_words_by_time(
+                    abs_words, committed_until_seconds
+                )
+                raw_text = deduped_text if overlap_present else str(result.get("text", ""))
+            else:
+                raw_text = str(result.get("text", ""))
+            text = re.sub(r"\s+", " ", raw_text).strip()
             text = strip_hallucinations(text)
             if len(text) < 2:
                 continue

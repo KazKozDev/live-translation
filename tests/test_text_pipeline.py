@@ -1,4 +1,6 @@
 from live_translation.text_pipeline import (
+    absolute_words,
+    dedup_words_by_time,
     last_word_end_seconds,
     merge_overlap_text,
     merge_partial_buffer,
@@ -86,6 +88,41 @@ def test_merge_overlap_text_drops_inflected_multiword_overlap():
         merge_overlap_text("сначала они теряют энерго", "теряют энергию в пути")
         == "в пути"
     )
+
+
+def test_dedup_words_by_time_keeps_all_on_first_chunk():
+    words = [(0.0, 0.5, "hello"), (0.5, 1.0, "world")]
+    text, until = dedup_words_by_time(words, None)
+    assert text == "hello world"
+    assert until == 1.0
+
+
+def test_dedup_words_by_time_drops_overlap_region():
+    # Covered up to 5.0s; an overlapping chunk re-transcribes 4.5-6.0s.
+    words = [(4.5, 4.9, "energy"), (5.1, 5.6, "fades"), (5.6, 6.0, "slowly")]
+    text, until = dedup_words_by_time(words, committed_until=5.0)
+    assert text == "fades slowly"  # 'energy' midpoint 4.7 < 5.0 -> dropped
+    assert until == 6.0
+
+
+def test_dedup_words_by_time_ignores_spelling_of_duplicate():
+    # A boundary word re-transcribed with different spelling still sits in covered time.
+    words = [(4.4, 4.9, "преодолимое"), (5.2, 5.8, "дальше")]
+    text, until = dedup_words_by_time(words, committed_until=5.0)
+    assert text == "дальше"
+    assert until == 5.8
+
+
+def test_absolute_words_shifts_timestamps_to_global_timeline():
+    result = {
+        "segments": [
+            {"words": [
+                {"word": " hi", "start": 0.5, "end": 1.0},
+                {"word": " there", "start": 1.0, "end": 1.5},
+            ]}
+        ]
+    }
+    assert absolute_words(result, 10.0) == [(10.5, 11.0, "hi"), (11.0, 11.5, "there")]
 
 
 def test_merge_overlap_text_keeps_distinct_similar_words():
