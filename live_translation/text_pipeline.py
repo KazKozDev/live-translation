@@ -199,6 +199,28 @@ def _normalized_words(text):
     return [m.group(0).casefold().strip("'’-") for m in _word_matches(text)]
 
 
+def _common_prefix_len(a, b):
+    n = 0
+    for ca, cb in zip(a, b, strict=False):
+        if ca != cb:
+            break
+        n += 1
+    return n
+
+
+def _same_token(a, b):
+    """Whether two normalized words are the same word, allowing a re-transcribed ending
+    from a chunk-boundary cut (e.g. 'энерго'/'энергию', 'невероятной'/'невероятный',
+    'соотношения'/'соотношение'). Requires a strong shared stem so distinct words
+    ('стол'/'стул', 'красная'/'красивая') are not collapsed."""
+    if a == b:
+        return True
+    shorter = min(len(a), len(b))
+    if shorter < 4:
+        return False
+    return _common_prefix_len(a, b) >= max(4, int(shorter * 0.6) + 1)
+
+
 def _drop_prefix_words(text, word_count):
     end = 0
     for idx, match in enumerate(_word_matches(text), 1):
@@ -223,12 +245,21 @@ def merge_overlap_text(previous_tail, incoming, min_overlap=12, max_overlap=120)
     if incoming_words and " ".join(incoming_words) in " ".join(prev_words):
         return ""
 
+    # Largest word overlap where the leading words match exactly and the boundary (last)
+    # word may be a re-transcribed stem variant — the common chunk-seam duplication.
     max_words = min(len(prev_words), len(incoming_words), 28)
-    for size in range(max_words, 2, -1):
-        if prev_words[-size:] == incoming_words[:size]:
-            return _drop_prefix_words(incoming, size)
-    if prev_words and incoming_words and prev_words[-1] == incoming_words[0] and len(incoming_words[0]) >= 5:
-        return _drop_prefix_words(incoming, 1)
+    for size in range(max_words, 0, -1):
+        prev_slice = prev_words[-size:]
+        inc_slice = incoming_words[:size]
+        if prev_slice[:-1] != inc_slice[:-1]:
+            continue
+        if not _same_token(prev_slice[-1], inc_slice[-1]):
+            continue
+        # A lone boundary word with no preceding anchor is only safe to drop when it's a
+        # solid word (>=4 chars); otherwise short coincidental repeats would be eaten.
+        if size == 1 and min(len(prev_slice[0]), len(inc_slice[0])) < 4:
+            continue
+        return _drop_prefix_words(incoming, size)
 
     prev_lower = previous_tail.lower()
     incoming_lower = incoming.lower()

@@ -67,6 +67,33 @@ def test_merge_overlap_text_removes_repeated_prefix_words():
     assert merge_overlap_text(previous, incoming) == "and promised another vote"
 
 
+def test_merge_overlap_text_drops_short_exact_boundary_repeat():
+    # "...средней руки" + "руки и ..." -> the duplicated 4-letter word is removed
+    assert merge_overlap_text("ядра средней руки", "руки и ядра") == "и ядра"
+    assert merge_overlap_text("задаем небу", "небу и звездам") == "и звездам"
+
+
+def test_merge_overlap_text_drops_inflected_boundary_repeat():
+    # Whisper re-transcribes the boundary word with a different ending across the seam.
+    assert merge_overlap_text("они теряют энерго", "энергию медленнее") == "медленнее"
+    assert merge_overlap_text("это казалось невероятной", "невероятный поворот") == "поворот"
+    assert merge_overlap_text("при пересчете соотношения", "соотношение энергии") == "энергии"
+
+
+def test_merge_overlap_text_drops_inflected_multiword_overlap():
+    # Leading words match exactly, only the boundary word differs by inflection.
+    assert (
+        merge_overlap_text("сначала они теряют энерго", "теряют энергию в пути")
+        == "в пути"
+    )
+
+
+def test_merge_overlap_text_keeps_distinct_similar_words():
+    # Different words that merely start alike must not be collapsed.
+    assert merge_overlap_text("большой стол", "стул стоит у окна") == "стул стоит у окна"
+    assert merge_overlap_text("она надела красное", "красивое платье") == "красивое платье"
+
+
 def test_merge_partial_buffer_replaces_repeated_window():
     buffer = "one two three four five six seven eight nine ten eleven"
     incoming = "six seven eight nine ten eleven twelve thirteen fourteen"
