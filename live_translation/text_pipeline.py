@@ -61,9 +61,9 @@ def prompt_language(code, auto_label="auto-detected speech"):
     return f"{name} ({code})" if code else auto_label
 
 
-def live_translation_messages(src_code, tgt_code, text):
+def live_translation_messages(src_code, tgt_code, text, history=None):
     target = language_name(tgt_code)
-    return [
+    messages = [
         {
             "role": "system",
             "content": (
@@ -73,9 +73,22 @@ def live_translation_messages(src_code, tgt_code, text):
                 "Do not add commentary. Preserve names, numbers, places, dates, "
                 "product names, and technical terms. Fix obvious speech-recognition "
                 "errors only when the intended meaning is clear. If the transcript is "
-                "incomplete, translate only what is present."
+                "incomplete, translate only what is present. Earlier turns are prior "
+                "context for consistent terminology and pronouns — translate only the "
+                "newest transcript, never repeat earlier ones."
             ),
         },
+    ]
+    # Prior committed source -> translation pairs, replayed as conversation turns so the
+    # model keeps terminology, names and pronouns consistent across blocks.
+    for prev_src, prev_tgt in history or []:
+        prev_src = re.sub(r"\s+", " ", str(prev_src or "")).strip()
+        prev_tgt = re.sub(r"\s+", " ", str(prev_tgt or "")).strip()
+        if not prev_src or not prev_tgt:
+            continue
+        messages.append({"role": "user", "content": f"New transcript:\n{prev_src}"})
+        messages.append({"role": "assistant", "content": prev_tgt})
+    messages.append(
         {
             "role": "user",
             "content": (
@@ -83,8 +96,9 @@ def live_translation_messages(src_code, tgt_code, text):
                 f"Target language: {prompt_language(tgt_code, 'the target language')}\n\n"
                 f"New transcript:\n{text}"
             ),
-        },
-    ]
+        }
+    )
+    return messages
 
 
 HALLUCINATION_PATTERNS = [

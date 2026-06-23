@@ -1,6 +1,11 @@
 import queue
 
-from live_translate_overlay import post_source_and_enqueue_translation, release_mlx_whisper_model
+from live_translate_overlay import (
+    TRANSLATION_HISTORY_MAX_PAIRS,
+    post_source_and_enqueue_translation,
+    release_mlx_whisper_model,
+    translation_history,
+)
 
 
 class RecordingOverlay:
@@ -31,6 +36,29 @@ def test_finalized_transcript_is_posted_before_translation_queue_drop():
         "pause_ms": 1500.0,
         "source_language": "en",
     }
+
+
+def test_translation_history_keeps_recent_pairs_newest_last():
+    pairs = [("s1", "t1"), ("s2", "t2"), ("s3", "t3")]
+    history = translation_history(pairs, exclude_last=False)
+    assert history == pairs[-TRANSLATION_HISTORY_MAX_PAIRS:]
+    assert history[-1] == ("s3", "t3")
+
+
+def test_translation_history_excludes_last_pair_when_merging():
+    pairs = [("s1", "t1"), ("s2", "t2"), ("s3", "t3")]
+    # exclude_last drops the newest pair (it's being merged into the current source)
+    history = translation_history(pairs, exclude_last=True)
+    assert ("s3", "t3") not in history
+    assert history == pairs[:-1][-TRANSLATION_HISTORY_MAX_PAIRS:]
+
+
+def test_translation_history_bounded_by_chars():
+    big = "x" * 5000
+    pairs = [("a", "b"), (big, big)]
+    history = translation_history(pairs, exclude_last=False)
+    # The oversized newest pair alone is allowed, but it must not drag in older ones.
+    assert history == [(big, big)]
 
 
 def test_release_mlx_whisper_model_clears_matching_holder():

@@ -51,6 +51,12 @@ if [ ! -x "$PY" ]; then
     exit 1
 fi
 
+# The log is append-only across launches; trim it to the most recent lines before
+# starting so it can't grow without bound (it had reached tens of MB).
+if [ -f "$LOG" ]; then
+    tail -n 2000 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+fi
+
 {
     echo "===== $(date) :: launch ====="
     exec "$PY" "$SCRIPT" --legacy-chunking --whisper turbo --ollama-model gemma4:26b-mlx --ollama-num-ctx 4096 "$@"

@@ -130,6 +130,10 @@ TRANSLATION_TAIL_REGROUP_SECONDS = 8.0
 TRANSLATION_TAIL_MAX_MERGED_CHARS = 420
 TRANSLATION_TAIL_MAX_SOURCE_MERGED_CHARS = 1400
 TRANSLATION_MAX_DYNAMIC_TOKENS = 900
+# Recent committed source->translation pairs fed back to the translator as context for
+# consistent terminology/pronouns across blocks. Bounded to keep prompt size (latency) low.
+TRANSLATION_HISTORY_MAX_PAIRS = 2
+TRANSLATION_HISTORY_MAX_CHARS = 700
 
 ELLIPSIS_END_RE = re.compile(r"(?:\.{2,}|…)\s*$")
 SOFT_END_RE = re.compile(r"(?:[!?]+|(?<!\.)\.(?!\.))\s*$")
@@ -213,6 +217,9 @@ class ConsoleOverlay:
         if self.show_partial and source:
             print("\n--- partial ---")
             print(source, flush=True)
+
+    def post_partial_translation(self, translated):
+        pass  # console shows only the final translation via post_pair
 
     def run(self):
         while not self.stop_event.is_set():
@@ -364,6 +371,7 @@ class GlassOverlay:
         self.settings = settings
         self.original_text = ""
         self.partial_text = ""
+        self.partial_translation = ""
         self.show_partial = show_partial
         self.translated_text = ""
         self.original_blocks = []
@@ -1351,6 +1359,7 @@ class GlassOverlay:
         self.original_blocks = []
         self.translation_blocks = []
         self.partial_text = ""
+        self.partial_translation = ""
         now = time.monotonic()
         self.session_started_at = now - duration
         for pair in self.history_pairs[-16:]:
@@ -1516,6 +1525,7 @@ class GlassOverlay:
         self.session_time_offset_seconds = 0.0
         self.session_started_at = time.monotonic()
         self.partial_text = ""
+        self.partial_translation = ""
         # Also wipe both workers' rolling state (audio buffer, tail, sentence buffer,
         # Whisper context) and pending queues so it restarts from a clean slate.
         reset_gen = getattr(self, "reset_gen", None)
@@ -1802,6 +1812,7 @@ class GlassOverlay:
                 self.translation_blocks = []
                 self.history_pairs = []
                 self.partial_text = ""
+                self.partial_translation = ""
                 self.current_session = self._new_current_session()
                 self.session_time_offset_seconds = 0.0
                 self.session_started_at = time.monotonic()
@@ -2137,6 +2148,11 @@ class GlassOverlay:
             return
         self.AppHelper.callAfter(self._set_partial, source)
 
+    def post_partial_translation(self, translated):
+        # The streaming translation is the real (about-to-be-committed) text arriving live,
+        # not a speculative draft — show it regardless of show_partial.
+        self.AppHelper.callAfter(self._set_partial_translation, translated)
+
     def post_source(self, source, pause_ms=0):
         self.AppHelper.callAfter(self._append_source, source, pause_ms)
 
@@ -2268,6 +2284,9 @@ class GlassOverlay:
                 self._persist_current_session()
             if append_source:
                 self._append_source(source, pause_ms, now=now)
+            # The streamed live draft (if any) is now superseded by the committed block.
+            had_partial = bool(self.partial_translation)
+            self.partial_translation = ""
             if translated:
                 if replace_translation_tail:
                     self._replace_translation_tail(
@@ -2278,6 +2297,8 @@ class GlassOverlay:
                     )
                 else:
                     self._append_translation_block(translated, now, speaker_gap, source)
+                self._render_translation()
+            elif had_partial:
                 self._render_translation()
         except Exception as exc:
             print(f"[ui] _append_pair: {exc!r}", file=sys.stderr)
@@ -2372,6 +2393,13 @@ class GlassOverlay:
         except Exception as exc:
             print(f"[ui] _set_partial: {exc!r}", file=sys.stderr)
 
+    def _set_partial_translation(self, translated):
+        try:
+            self.partial_translation = str(translated or "").strip()
+            self._render_translation()
+        except Exception as exc:
+            print(f"[ui] _set_partial_translation: {exc!r}", file=sys.stderr)
+
     def _render_original(self):
         full_text, spans = self._compose_blocks(self.original_blocks)
         partial = self.partial_text.strip()
@@ -2408,6 +2436,11 @@ class GlassOverlay:
 
     def _render_translation(self):
         full_text, spans = self._compose_blocks(self.translation_blocks)
+        partial = self.partial_translation.strip()
+        if partial:
+            if full_text and not full_text.endswith("\n\n"):
+                full_text += "\n\n"
+            full_text += partial
         if not full_text:
             full_text = self._waiting_translation()
         font = self.NSFont.systemFontOfSize_weight_(self.font_size, 0.22)
@@ -2420,6 +2453,16 @@ class GlassOverlay:
             attrs,
         )
         self._apply_block_fade(attributed, spans, font)
+        if partial:
+            partial_start = len(full_text) - len(partial)
+            partial_attrs = {
+                self.NSForegroundColorAttributeName: self._text_color(0.32),
+                self.NSFontAttributeName: font,
+            }
+            attributed.addAttributes_range_(
+                partial_attrs,
+                self.NSMakeRange(partial_start, len(partial)),
+            )
         self.translated_view.textStorage().setAttributedString_(attributed)
         self.translated_view.scrollRangeToVisible_(self.NSMakeRange(len(full_text), 0))
 
@@ -3315,9 +3358,27 @@ def transcribe_translate_worker(
                 Path(temp_path).unlink(missing_ok=True)
 
 
+def translation_history(recent_pairs, exclude_last):
+    """Most recent committed (source, translated) pairs as translator context, newest last,
+    bounded by count and total chars. `exclude_last` drops the newest pair — used when it's
+    being merged into the current source, so it isn't duplicated as context."""
+    pairs = recent_pairs[:-1] if exclude_last and recent_pairs else list(recent_pairs)
+    selected = []
+    total = 0
+    for src, tgt in reversed(pairs):
+        if len(selected) >= TRANSLATION_HISTORY_MAX_PAIRS:
+            break
+        total += len(str(src)) + len(str(tgt))
+        if selected and total > TRANSLATION_HISTORY_MAX_CHARS:
+            break
+        selected.append((src, tgt))
+    return list(reversed(selected))
+
+
 def translation_worker(translation_q, overlay, translator, stop_event, settings, reset_gen=None):
     seen_gen = reset_gen[0] if reset_gen is not None else 0
     last_source = ""
+    recent_pairs = []  # committed (source, translated) context for terminology continuity
     active_ollama_model = None
 
     def maybe_log_slow(label, started_at, extra=""):
@@ -3330,6 +3391,7 @@ def translation_worker(translation_q, overlay, translator, stop_event, settings,
         if reset_gen is not None and reset_gen[0] != seen_gen:
             seen_gen = reset_gen[0]
             last_source = ""
+            recent_pairs = []
             active_ollama_model = None
             while True:
                 try:
@@ -3391,7 +3453,22 @@ def translation_worker(translation_q, overlay, translator, stop_event, settings,
                 combined_source,
                 getattr(translator, "max_tokens", 180),
             )
-            translated = translator.translate(combined_source, max_tokens=max_tokens)
+            # Stream the translation into the overlay as it's generated so the user sees it
+            # arrive instead of waiting for the whole block. Skip streaming for the
+            # "revised" merge path (replace_translation_tail), where a live draft below the
+            # still-shown previous tail would read as duplicated text.
+            def on_delta(partial, _gen=gen_at_start):
+                if reset_gen is not None and reset_gen[0] != _gen:
+                    return
+                overlay.post_partial_translation(partial)
+
+            history = translation_history(recent_pairs, exclude_last=should_replace_tail)
+            translated = translator.translate(
+                combined_source,
+                max_tokens=max_tokens,
+                on_delta=None if should_replace_tail else on_delta,
+                history=history,
+            )
             maybe_log_slow(
                 "translate",
                 translate_started,
@@ -3414,7 +3491,15 @@ def translation_worker(translation_q, overlay, translator, stop_event, settings,
                     confidence=confidence,
                 )
                 last_source = combined_source
+                # Keep the committed pair as context for the next block. On the "revised"
+                # merge path it supersedes the previous pair rather than adding a new one.
+                if should_replace_tail and recent_pairs:
+                    recent_pairs[-1] = (combined_source, translated)
+                else:
+                    recent_pairs.append((combined_source, translated))
+                del recent_pairs[: -(TRANSLATION_HISTORY_MAX_PAIRS + 1)]
         except Exception as exc:
+            overlay.post_partial_translation("")  # drop any half-streamed draft
             overlay.post_pair("", f"Error: {exc}")
             time.sleep(1.0)
 

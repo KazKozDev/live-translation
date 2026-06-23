@@ -53,6 +53,88 @@ def test_ollama_qwen_uses_chat_api_and_disables_thinking(monkeypatch):
     assert "/no_think" not in json.dumps(messages)
 
 
+class FakeStreamResponse:
+    def __init__(self, chunks):
+        # Each chunk is serialized as one NDJSON line, the way Ollama streams.
+        self.lines = [json.dumps(c).encode("utf-8") + b"\n" for c in chunks]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        return iter(self.lines)
+
+
+def test_ollama_translate_streams_tokens_to_callback(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return FakeStreamResponse(
+            [
+                {"message": {"content": "При"}},
+                {"message": {"content": "вет"}},
+                {"message": {"content": " мир"}, "done": True},
+            ]
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    translator = OllamaTranslator(
+        model="gemma4:12b-mlx",
+        target="ru",
+        url="http://127.0.0.1:11434",
+        max_tokens=180,
+        temperature=0.1,
+        reasoning=False,
+        source="en",
+    )
+
+    deltas = []
+    # throttle_seconds=0 so every token fires the callback in the test
+    result = translator.translate(
+        "hello world", on_delta=lambda t: deltas.append(t)
+    )
+
+    assert result == "Привет мир"
+    assert captured["payload"]["stream"] is True
+    assert deltas[-1] == "Привет мир"
+    assert deltas == sorted(deltas, key=len)  # text only grows
+
+
+def test_ollama_translate_passes_history_as_prior_turns(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse({"message": {"content": "продолжение"}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    translator = OllamaTranslator(
+        model="gemma4:12b-mlx",
+        target="ru",
+        url="http://127.0.0.1:11434",
+        max_tokens=180,
+        temperature=0.1,
+        reasoning=False,
+        source="en",
+    )
+
+    out = translator.translate(
+        "the next part", history=[("the first part", "первая часть")]
+    )
+
+    assert out == "продолжение"
+    messages = captured["payload"]["messages"]
+    # system, prior user, prior assistant, current user
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert "the first part" in messages[1]["content"]
+    assert messages[2]["content"] == "первая часть"
+    assert messages[3]["content"].endswith("the next part")
+
+
 def test_ollama_translate_accepts_per_call_token_override(monkeypatch):
     captured = {}
 

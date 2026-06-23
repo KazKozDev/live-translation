@@ -1,8 +1,10 @@
 """Local translation backends used by the live overlay."""
 
+import contextlib
 import json
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -115,7 +117,7 @@ class OllamaTranslator:
     def set_source(self, source):
         self.source = source
 
-    def translate(self, text, max_tokens=None):
+    def translate(self, text, max_tokens=None, on_delta=None, history=None):
         num_predict = int(max_tokens or self.max_tokens)
         options = {
             "temperature": self.temperature,
@@ -125,10 +127,14 @@ class OllamaTranslator:
         }
         if self.num_ctx:
             options["num_ctx"] = int(self.num_ctx)
+        # Stream tokens as they're generated so the UI can show the translation arriving
+        # instead of waiting for the whole block. Disabled when reasoning is on (thinking
+        # tokens would interleave) or when the caller doesn't want partials.
+        stream = on_delta is not None and not self.reasoning
         payload = {
             "model": self.model,
-            "messages": live_translation_messages(self.source, self.target, text),
-            "stream": False,
+            "messages": live_translation_messages(self.source, self.target, text, history),
+            "stream": stream,
             "think": bool(self.reasoning),
             "keep_alive": "30m",
             "options": options,
@@ -141,6 +147,8 @@ class OllamaTranslator:
             method="POST",
         )
         try:
+            if stream:
+                return self._translate_stream(req, on_delta)
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.URLError as exc:
@@ -150,3 +158,37 @@ class OllamaTranslator:
             ) from exc
         response = body.get("message", {}).get("content", "")
         return strip_llm_noise(response)
+
+    def _translate_stream(self, req, on_delta, throttle_seconds=0.1):
+        """Read Ollama's newline-delimited streaming response, forwarding the growing
+        translation to on_delta (throttled), and return the final cleaned text."""
+        parts = []
+        last_emit = 0.0
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    delta = chunk.get("message", {}).get("content", "")
+                    if delta:
+                        parts.append(delta)
+                        now = time.monotonic()
+                        if now - last_emit >= throttle_seconds:
+                            last_emit = now
+                            with contextlib.suppress(Exception):
+                                on_delta(strip_llm_noise("".join(parts)))
+                    if chunk.get("done"):
+                        break
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Ollama is not responding. Run `ollama serve` and pull the model: "
+                f"`ollama pull {self.model}`."
+            ) from exc
+        final = strip_llm_noise("".join(parts))
+        # Throttling may have skipped the last tokens — push the complete text once so the
+        # live draft is whole even if the commit that follows is briefly delayed.
+        with contextlib.suppress(Exception):
+            on_delta(final)
+        return final
