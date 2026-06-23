@@ -1,6 +1,6 @@
 [project]
 name = "live-translation"
-version = "1.0.3"
+version = "1.1.0"
 description = "Local macOS live speech transcription and translation overlay."
 readme = "README.md"
 requires-python = ">=3.12"
