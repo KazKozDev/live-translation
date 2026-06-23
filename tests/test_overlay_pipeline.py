@@ -2,6 +2,7 @@ import queue
 
 from live_translate_overlay import (
     TRANSLATION_HISTORY_MAX_PAIRS,
+    overlap_tail_start,
     post_source_and_enqueue_translation,
     release_mlx_whisper_model,
     translation_history,
@@ -36,6 +37,21 @@ def test_finalized_transcript_is_posted_before_translation_queue_drop():
         "pause_ms": 1500.0,
         "source_language": "en",
     }
+
+
+def test_overlap_tail_start_drops_overlap_on_clean_vad_cut():
+    # Silence-aligned cut: next chunk starts fresh, no re-fed overlap audio.
+    assert overlap_tail_start(cut=96000, overlap_frames=12000, clean_cut=True) == 96000
+
+
+def test_overlap_tail_start_keeps_overlap_on_midspeech_cut():
+    # Forced mid-speech cut: keep the overlap tail so a straddling word isn't lost.
+    assert overlap_tail_start(cut=96000, overlap_frames=12000, clean_cut=False) == 84000
+
+
+def test_overlap_tail_start_handles_no_overlap_and_underflow():
+    assert overlap_tail_start(cut=5000, overlap_frames=0, clean_cut=False) == 5000
+    assert overlap_tail_start(cut=8000, overlap_frames=12000, clean_cut=False) == 0
 
 
 def test_translation_history_keeps_recent_pairs_newest_last():

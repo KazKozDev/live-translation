@@ -2891,6 +2891,19 @@ def audio_capture_worker(audio_q, stop_event, device, samplerate, channels, bloc
             pass
 
 
+def overlap_tail_start(cut, overlap_frames, clean_cut):
+    """Index where the next chunk's audio buffer should begin after emitting one.
+
+    Keep an overlap tail only when we had to cut mid-speech (fixed-window cut), so a word
+    straddling the boundary isn't lost. A VAD silence-aligned cut (`clean_cut`) already
+    lands between words, so the next chunk starts fresh — no re-transcribed audio and no
+    boundary duplication. Language-agnostic (VAD is language-independent) and slightly
+    faster (less audio per chunk)."""
+    if clean_cut or not overlap_frames:
+        return cut
+    return max(0, cut - overlap_frames)
+
+
 def chunk_worker(
     audio_q,
     chunk_q,
@@ -2998,6 +3011,7 @@ def chunk_worker(
 
             cut = min(frames, frames_needed)
             has_speech = True
+            vad_cut = None
             if vad_model is not None:
                 has_speech, vad_cut = vad_analyze(
                     buffer[:cut],
@@ -3013,7 +3027,7 @@ def chunk_worker(
             audio = buffer[:cut].copy()
             chunk_start_seconds = buffer_start_seconds
             chunk_end_seconds = chunk_start_seconds + len(audio) / samplerate
-            tail_start = max(0, cut - overlap_frames) if overlap_frames else cut
+            tail_start = overlap_tail_start(cut, overlap_frames, clean_cut=vad_cut is not None)
             buffer = buffer[tail_start:]
             buffer_start_seconds += tail_start / samplerate
             frames = len(buffer)
