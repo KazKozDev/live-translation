@@ -45,6 +45,8 @@ Live Translation combines:
 Requires macOS with Apple silicon.
 
 ```bash
+git clone https://github.com/KazKozDev/live-translation.git
+cd live-translation
 ./setup.sh
 ```
 
