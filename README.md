@@ -1,16 +1,10 @@
 # Live Translation
 
-A little macOS app that listens to **any sound your Mac is playing — from any app** — transcribes it, translates it, and paints both the original and the translation onto a floating glass overlay, live, as people talk.
+A macOS app that listens to **any sound your Mac is playing — from any app** — transcribes it, translates it, and paints both the original and the translation onto a floating glass overlay, live, as people talk.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Live Translation overlay — original on the left, translation on the right" width="700">
 </p>
-
-That's the whole idea: it doesn't care *where* the audio comes from. A YouTube video, a Zoom call, a Twitch stream, a foreign news livestream — if your Mac can play it through its speakers, this can transcribe it and translate it into a language you actually read. Real-time transcription + translation for the entire machine.
-
-I built it for the moments when audio is useful but the language is in the way. It shows both what was said and what it means in your language. It grew a bunch of knobs from there.
-
-It's a hack. It works surprisingly well. Read on.
 
 ## TLDR
 
@@ -23,29 +17,17 @@ Under the hood: [MLX](https://github.com/ml-explore/mlx) Whisper for transcripti
 
 ## Who's this for
 
-Honestly I built it for me, but if any of these is you, it'll probably help:
-
-- You watch **foreign-language media** — news, YouTube, documentaries, films, Twitch — and want live transcription and translation instead of waiting for subtitles.
-- You're **learning a language** and want to see the original *and* a translation side by side, live, on real native speech instead of textbook audio.
+- You watch **foreign-language media** — news, YouTube, documentaries, films, Twitch — and want live captions and translation.
+- You're **learning a language** and want the original and a translation side by side on real native speech.
 - You sit in **calls / meetings / webinars** in a language you only half-speak.
-- You want **captions and translation for accessibility** on audio that has none.
-- You just want to know **what that video is actually saying** without copy-pasting anything anywhere.
+- You want **captions for accessibility** on audio that has none.
+- You need **fully offline, private** transcription — audio never leaves your Mac, no API key or account required.
 
-And a hard requirement for some people: it's **fully offline and private**. The audio never leaves your Mac. No API key, no account, no cloud. That matters if you're translating a confidential call or you just don't want your media diet logged somewhere.
+## What makes this different
 
-## How it's different from the other repos
+Most "whisper + something" projects are either cloud-backed, transcription-only, OBS plugins for streaming to others, meeting bots tied to a specific call, or word-by-word MT that produces choppy output.
 
-There are a lot of "whisper + something" projects on GitHub. I looked. Most fall into one of these, and this one sits in the gap between them:
-
-- **Cloud captioners / translators** (anything calling the OpenAI/Deepgram/Google APIs) — fast and accurate, but your audio leaves the machine and you pay per minute. This is 100% local.
-- **Transcription-only tools** (MacWhisper, Buzz, whisper.cpp GUIs) — great at speech→text, but they don't translate, and many want a *file*, not live system audio.
-- **OBS / streamer plugins** (LocalVocal) — live and local, but built for broadcasting to *your* viewers, configured inside OBS, not a thing you pop open to read a video yourself.
-- **Meeting bots** — join a specific Zoom/Meet call via an account/bot; they don't caption arbitrary system audio from any app.
-- **Word-by-word MT** — translate token streams with a small MT model; cheaper, but you get choppy word-salad instead of sentences.
-
-What this combines, which I didn't find in one place: **any app's audio** (system-wide, not file/URL/one-call) + **a real LLM doing sentence-level translation** (not word-by-word MT) + **a floating glass overlay** you read on top of anything + **fully local** + a deliberate **don't-lose-words** design. It's not the fastest or the prettiest; it's the one that translates the *whole machine* into readable sentences.
-
-(It's still a small Python project you can actually read end to end, if that's your thing.)
+This combines: **any app's audio** (system-wide, not file/URL/one-call) + **a real LLM doing sentence-level translation** + **a floating glass overlay** you read on top of anything + **fully local** + a deliberate **don't-lose-words** design.
 
 ## Quickstart
 
@@ -64,125 +46,104 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 brew bundle --file=Brewfile      # installs BlackHole + ffmpeg + ollama
 ```
 
-If dependency resolution changes in the future and the install starts breaking, use `requirements.lock.txt` for the exact pinned environment I tested with.
+If dependency resolution changes and the install breaks, use `requirements.lock.txt` for the exact pinned environment.
 
 ### 2. Capturing system audio — why you need BlackHole
 
-macOS, on purpose, won't let an app just grab "whatever is coming out of the speakers." A microphone, sure. The system output, no. So to feed your Mac's audio into this app we need a **virtual audio device** that loopbacks output → input. That's [**BlackHole**](https://github.com/ExistentialAudio/BlackHole) — a free, open-source virtual audio driver. The `2ch` variant is what we use.
+macOS won't let an app grab "whatever is coming out of the speakers," so we need [**BlackHole**](https://github.com/ExistentialAudio/BlackHole) — a free virtual audio driver that loopbacks output → input. The `2ch` variant is what we use.
 
-The catch: if you send audio *into* BlackHole, it stops coming out of your speakers, so you'd go deaf. The fix is a **Multi-Output Device** that sends audio to your speakers/headphones *and* BlackHole at the same time:
-
-1. Open **Audio MIDI Setup** (in /Applications/Utilities)
-2. Click **+** → **Create Multi-Output Device**
-3. Tick both your normal output (e.g. *MacBook Speakers*) **and** *BlackHole 2ch*
-4. Set that Multi-Output Device as your system output (System Settings → Sound → Output)
-
-Now you hear everything normally, and the app hears it too. (If you don't care about hearing it yourself, you can skip the Multi-Output and just set output straight to BlackHole.)
+To keep hearing audio yourself, create a **Multi-Output Device** in Audio MIDI Setup that sends to both your normal output and BlackHole 2ch, then set it as your system output (System Settings → Sound → Output). Now you hear everything normally and the app hears it too.
 
 ### 3. The models
 
-Models get downloaded the first time (or up front by `setup.sh`):
+- **Whisper medium + turbo** (transcription) — MLX, pulled automatically from Hugging Face on first run. (`small` and `large` download on the fly if selected in settings.)
+- **Gemma 4 via Ollama** (translation) — choose `gemma4:26b-mlx`, `gemma4:e4b-mlx`, or `gemma4:12b-mlx` from in-app settings.
+- **Silero VAD** ships inside the `silero-vad` pip package.
 
-- **Whisper medium + turbo** (transcription) — MLX, pulled automatically from Hugging Face on first run. (`small` and `large` download on the fly if you pick them in settings.)
-- **Gemma 4 via Ollama** (translation) — choose `gemma4:26b-mlx`, `gemma4:e4b-mlx`, or `gemma4:12b-mlx` from the in-app settings.
-- **Silero VAD** ships inside the `silero-vad` pip package — nothing to download.
-
-To grab them ahead of time instead of on first launch:
+To pre-download instead of waiting on first launch:
 
 ```bash
 ./.venv/bin/python -c "from huggingface_hub import snapshot_download; \
 [snapshot_download(r) for r in ('mlx-community/whisper-medium-mlx', 'mlx-community/whisper-large-v3-turbo')]"
-```
 
-For translation models:
-
-```bash
 for model in gemma4:26b-mlx gemma4:e4b-mlx gemma4:12b-mlx; do ollama pull "$model"; done
 ```
 
 ### 4. Run
 
-Two ways — pick whichever you like, they open the exact same overlay.
+**a) Double-click `LiveTranslate.app`** — launch from Finder (see step 5 to move it to /Applications).
 
-**a) Double-click `LiveTranslate.app`** — the no-terminal way. Just launch it from Finder (see step 5 to move it to /Applications).
-
-**b) From the terminal** — if you'd rather not use the app at all:
+**b) From the terminal:**
 
 ```bash
 ./.venv/bin/python live_translate_overlay.py --target ru
 ```
 
-(Call the venv's python directly so you know you're using the environment from `./setup.sh`.) The defaults already match the app's launcher (lossless chunker, `--whisper turbo`, `--ollama-model gemma4:26b-mlx`), so the line above behaves identically to double-clicking. This is also where you tweak anything — pass `--source es`, `--whisper large`, `--streaming`, etc.:
+The defaults match the app launcher (`--whisper turbo`, `--ollama-model gemma4:26b-mlx`). To tweak:
 
 ```bash
 ./.venv/bin/python live_translate_overlay.py --source es --whisper large --target ru
 ```
 
-See [knobs](#knobs) below or `--help` for the full list.
-
-Either way: pick source/target languages in the overlay's top bar, play a video in any app, text shows up.
+See [Knobs](#knobs) or `--help` for the full list.
 
 ### 5. (Optional) put the app in /Applications
 
-`LiveTranslate.app` lives inside the project folder and works two ways:
+`LiveTranslate.app` works two ways:
 
-- **portable** (default) — keep the `.app` where it is and just double-click it. The launcher finds the project relative to itself, so you can copy the *whole folder* anywhere, on any Mac, and it still works. Nothing to configure.
-- **installed** — if you'd rather have the app on its own in `/Applications` (Launchpad, Spotlight, Dock), run:
+- **portable** (default) — keep the `.app` where it is and double-click it. The launcher finds the project relative to itself, so copying the whole folder to another location or Mac just works.
+- **installed** — to have the app in `/Applications` (Launchpad, Spotlight, Dock):
 
   ```bash
   ./install-app.sh            # copies to /Applications, or: ./install-app.sh ~/Apps
   ```
 
-  This records the project's location (so the detached app can still find your venv + models) and re-signs the copy. If you later move the project, just run `./install-app.sh` again from its new spot.
+  This records the project's location so the detached app can find your venv + models. If you later move the project, run `./install-app.sh` again from its new spot.
 
-**First launch on your Mac:** the app is ad-hoc signed (no Apple Developer ID), so Gatekeeper may refuse the first double-click with *"can't be opened because it is from an unidentified developer."* This is expected for a local build. Just **right-click the app → Open** once and confirm — macOS remembers the choice and double-click works normally afterward. (Or: System Settings → Privacy & Security → *Open Anyway*.) You'll also get a one-time microphone prompt — that's BlackHole's loopback audio, allow it.
+**First launch on your Mac:** the app is ad-hoc signed (no Apple Developer ID), so Gatekeeper may block the first double-click. Right-click the app → Open and confirm once — macOS remembers afterward. You'll also get a one-time microphone prompt for BlackHole's loopback audio.
 
 ## The bar at the top
 
-The window is two columns — original on the left, translation on the right — and a thin toolbar. Nothing needs explaining, but since you asked:
+The window is two columns — original on the left, translation on the right — and a thin toolbar:
 
-- **Source / Target** — the language you're listening to and the one you want it in. Leave Source on *Auto* and Whisper figures it out per sentence (pin it if the audio mixes languages and the detector wobbles).
-- **Compact** — hide the original, show only the translation (one wide column) when you just want the gist.
-- **Pin** — keep the window floating above everything (on by default). Turn off if you want it to behave like a normal window.
-- **A- / A+** — font size. Read it over a bright video or shrink it out of the way.
-- **Color** — text color (white, graphite, a couple of warm/cool tints); pick whatever reads best over what's behind.
-- **lag: N** — how many audio chunks are waiting. Zero-ish = keeping up live; if it climbs and stays up, your machine isn't keeping pace (try `--whisper small`).
-- 🗑 **(trash)** — wipe everything and start clean: both columns, the history, and all the model state behind them.
-- **Save** — dump the whole session (every original + translation pair, not just what's on screen) as TXT, PDF, or timestamped subtitles (SRT / VTT).
-- **History** — every session is saved automatically to `~/Library/Application Support/LiveTranslate`; reopen or rename a past one from here.
+- **Source / Target** — the language you're listening to and the one you want. Leave Source on *Auto* and Whisper figures it out per sentence (pin it if the audio mixes languages).
+- **Compact** — hide the original, show only the translation in one wide column.
+- **Pin** — keep the window floating above everything (on by default).
+- **A- / A+** — font size.
+- **Color** — text color (white, graphite, warm/cool tints).
+- **lag: N** — audio chunks waiting. Zero-ish = keeping up live; if it climbs and stays up, try `--whisper small`.
+- 🗑 **(trash)** — wipe both columns, the history, and all model state behind them.
+- **Save** — dump the whole session as TXT, PDF, or timestamped subtitles (SRT / VTT).
+- **History** — every session is auto-saved to `~/Library/Application Support/LiveTranslate`; reopen or rename past ones from here.
 - **⚙ (settings)** — switch the Whisper size and Gemma model live, without restarting.
 
-The window itself is draggable (grab anywhere) and resizable from the edges; controls on the right tuck away if you make it narrow.
+The window is draggable and resizable; controls on the right tuck away if you make it narrow.
 
-## How it works (the parts I think are interesting)
+## How it works
 
-The naive version of this — chop audio into fixed 5s chunks, transcribe each one independently — is bad. Whisper sticks a period at the end of every chunk, cuts words in half at boundaries, and repeats itself. Most of the interesting work is in *not* doing that.
+The naive approach — fixed 5 s chunks, each transcribed independently — is bad. Whisper sticks a period at the end of every chunk, cuts words at boundaries, and repeats itself. Most of the interesting work is avoiding that.
 
-- **Segmentation that doesn't lose anything in normal load (the default).** Audio is cut into chunks *at natural pauses* (found with VAD), not at fixed sizes, so words don't get sliced in half. Each chunk is transcribed exactly once, with overlap between chunks; an overlap-dedup merges the seams, a sentence assembler regroups text on real punctuation, and a spurious-period stripper removes the period Whisper adds at a chunk end when the speaker only paused for breath. The hard rule here is **don't get stuck**: under normal load the pipeline catches up instead of throwing speech away; under severe overload it skips stale raw audio and jumps back to live rather than letting translation stop forever. The overlay shows finalized transcript/translation pairs by default, not a chopped live tail; I'd rather miss an overloaded moment than wedge the whole session.
+- **Lossless chunker (default).** Audio is cut at natural pauses (VAD), not fixed sizes, so words don't get sliced. Each chunk is transcribed exactly once with overlap; overlap-dedup merges seams, a sentence assembler regroups on real punctuation, and a spurious-period stripper removes the period Whisper adds when a speaker only paused for breath. Under normal load the pipeline catches up; under severe overload it skips stale raw audio and jumps to live rather than stalling forever.
 
-- **A smoother (but lossy) streaming mode, off by default.** There's also a LocalAgreement-2 mode (`whisper-streaming` / WhisperLiveKit style): keep a rolling buffer, re-transcribe it every ~1.5s, and only *commit* a word once two consecutive passes agree on it. It can show the unconfirmed tail as a dim live draft with `--show-partial`. Streaming reads beautifully — text flows and self-corrects instead of appearing in blocks. But re-transcribing the same audio repeatedly is expensive, and with heavier models it has to either drop audio or trim its buffer — i.e. **lose pieces**. Since I can't afford that, it's behind a flag; the default is the lossless chunker above. (It's the right call if you pair it with a faster model.)
+- **Streaming mode (`--streaming`), off by default.** A rolling buffer is re-transcribed every ~1.5 s; a word is committed once two consecutive passes agree (LocalAgreement-2). Text flows and self-corrects instead of appearing in blocks, but re-transcribing the same audio repeatedly is expensive — under load it either drops audio or trims its buffer. Use it paired with a faster model.
 
-- **Surviving Whisper's punctuation drift.** On fast, pause-less speech Whisper sometimes stops emitting punctuation for a stretch — and because the recently finalized text is fed back as its `initial_prompt`, a punctuation-less run *reinforces itself* and the overlay collapses into one giant paragraph, then snaps back later. Two guards: (1) the prompt feedback is dropped whenever that recent context has no sentence punctuation, so the next chunk can re-introduce sentence boundaries instead of inheriting the drift; (2) when a block still arrives with no punctuation at all, it's split into readable paragraphs at clause boundaries (commas/dashes) or, failing that, at word boundaries near a target length — never one wall, never mid-word.
+- **Surviving Whisper's punctuation drift.** On fast, pause-less speech Whisper sometimes stops emitting punctuation; because recently finalized text is fed back as `initial_prompt`, a punctuation-less run reinforces itself. Two guards: (1) prompt feedback is dropped when recent context has no sentence punctuation; (2) when a block arrives with no punctuation, it's split at clause boundaries or word boundaries near a target length — never one wall, never mid-word.
 
-- **VAD before Whisper.** Whisper *will* invent speech out of silence and music — it was trained on YouTube subtitles, so on non-speech it confidently emits "thanks for watching" and friends. So we run [Silero VAD](https://github.com/snakers4/silero-vad) first and simply don't send chunks without enough real speech. This killed most of the hallucinations and also fixed a nasty stall where long pauses (switching videos) would choke the pipeline.
+- **VAD before Whisper.** Whisper invents speech out of silence and music — it was trained on YouTube subtitles, so on non-speech it confidently emits "thanks for watching." Silero VAD runs first and blocks chunks without enough real speech. This eliminated most hallucinations and fixed stalls caused by long pauses between videos.
 
-- **A hallucination blocklist** for the ones that sneak through anyway ("gracias", "subtitles by amara.org", etc.), stripped before translation.
+- **A hallucination blocklist** for the ones that slip through ("gracias", "subtitles by amara.org", etc.), stripped before translation.
 
-- **Translation by a real LLM, not word-by-word MT.** The LLM gets whole sentences and the recently-translated context, so it produces coherent sentences instead of word salad. Translation runs in the same worker thread that loaded the model — sounds obvious, but MLX uses a thread-local GPU stream, so loading on one thread and generating on another silently explodes on long prompts. Lazy-load on first use fixed it.
-
-- The overlay is just an `NSTextView` in a floating window. Nothing fancy.
+- **Translation by a real LLM.** The LLM gets whole sentences plus recently-translated context, producing coherent output instead of word salad. Translation runs in the same worker thread that loaded the model — MLX uses a thread-local GPU stream, so loading on one thread and generating on another silently explodes on long prompts. Lazy-load on first use fixed it.
 
 ## The models
 
-**Transcription: Whisper on MLX.** Pick `small`, `medium`, `turbo`, or `large` in settings. `turbo` is the current default because it is the faster large-v3 variant and gives the live pipeline more headroom while staying much stronger than the tiny models; use `large` when accuracy matters more than latency. And **[MLX](https://github.com/ml-explore/mlx) because it's the fastest way to run Whisper on a Mac** — it's Apple's own array framework, runs on the GPU through Metal with unified memory (no copying audio tensors back and forth), and on Apple silicon it beats the CPU-bound options (faster-whisper, whisper.cpp) for this workload.
+**Transcription: Whisper on MLX.** Pick `small`, `medium`, `turbo`, or `large` in settings. `turbo` is the default (faster large-v3 variant, gives the live pipeline more headroom while staying much stronger than small models); use `large` when accuracy matters more than latency. MLX is the fastest way to run Whisper on a Mac — Apple's own array framework, running on the GPU through Metal with unified memory, beats CPU-bound alternatives for this workload.
 
 **Translation** uses **Gemma 4 via Ollama** — switch between the three sizes in settings.
 
-For the best overall quality, use `--whisper turbo` with `--ollama-model gemma4:26b-mlx`.
+Best overall quality: `--whisper turbo` with `--ollama-model gemma4:26b-mlx`.
 
 ## Knobs
-
-It's a CLI under the hood, so everything is tunable. Some you'll actually touch:
 
 ```
 --source / --target        languages (or pick in the UI). source=auto detects per-utterance
@@ -192,40 +153,36 @@ It's a CLI under the hood, so everything is tunable. Some you'll actually touch:
 --vad-min-speech-ms 250    min real speech per window before whisper sees it
 --audio-queue 120          raw audio backlog before old audio is skipped to recover
 --show-partial             also show the unfinalized live draft (off by default)
-# the lossless chunker is the default; opt into streaming mode (smoother, but lossy under load):
+# lossless chunker is the default; opt into streaming mode (smoother, but lossy under load):
 --streaming                LocalAgreement streaming instead of the lossless chunker
 --update-seconds 1.5       how often to re-transcribe the rolling buffer (lower = snappier, heavier)
 ```
 
-`./.venv/bin/python live_translate_overlay.py --help` for the full list (there are ~30; most you'll never need).
+`./.venv/bin/python live_translate_overlay.py --help` for the full list (~30 flags).
 
-## Robustness / things that took embarrassingly long
+## Robustness
 
-The "interesting" 20% above is the fun part. The other 80% was making it not fall over, which is never in the demo but is the whole difference between a toy and something you leave running for an hour. A sampler:
-
-- **The audio thread silently dying.** Switch YouTube videos, CoreAudio re-inits the route, the input callback goes quiet forever, and transcription just... stops, with no error. Now there's a watchdog that notices the silence and reopens the stream.
-- **The live-vs-complete tradeoff.** My first instinct when Whisper fell behind was to drop the oldest audio and stay *live* — great for a clock, terrible when you actually care about every word. Inverting that (run late and catch up, drop stale audio only as last-resort recovery) is the whole segmentation design above.
-- **The Clear button only clearing the screen.** Turns out "clear" needs to wipe the rolling audio buffer, both worker threads' state, the pending queues, *and* discard the chunk that's mid-flight inside Whisper at that exact moment. Otherwise old text keeps dribbling in after you hit clear. All of that now resets from one generation counter.
-- **Workers dying on a single bad frame.** One unguarded exception in the audio loop and the whole pipeline goes dark with nothing in the log. Everything is wrapped now and logs `[chunk]`/`[audio]`/`[stream]`/`[ui]` so the next stall names itself.
-- **Shipping it as a double-clickable app.** This ate an afternoon. macOS LaunchServices will *not* run a `.app` whose executable is a shell script — it just silently does nothing. So the bundle's executable is a tiny compiled C launcher that execs the real script, the whole thing is ad-hoc codesigned (`codesign -s -`), and only then does double-click work. Also it kept vanishing from the Dock until I set the activation policy to `Regular`.
-
-None of this is clever. All of it was necessary.
+- **Audio thread silently dying.** Switch YouTube videos, CoreAudio re-inits the route, the input callback goes quiet forever. A watchdog now notices the silence and reopens the stream.
+- **Live-vs-complete tradeoff.** Dropping the oldest audio to stay live is the wrong call when you care about every word. The pipeline runs late and catches up; it skips stale audio only as a last-resort recovery.
+- **The Clear button only clearing the screen.** "Clear" needs to wipe the rolling audio buffer, both worker threads' state, the pending queues, and the chunk mid-flight inside Whisper at that moment. All of that now resets from one generation counter.
+- **Workers dying on a single bad frame.** One unguarded exception in the audio loop silences the pipeline with nothing in the log. Everything is wrapped and logs `[chunk]`/`[audio]`/`[stream]`/`[ui]` so the next stall names itself.
+- **Shipping as a double-clickable app.** macOS LaunchServices won't run a `.app` whose executable is a shell script. The bundle's executable is a tiny compiled C launcher that execs the real script, the whole thing is ad-hoc codesigned, and only then does double-click work.
 
 ## Honest caveats
 
 - macOS + Apple silicon only. The overlay is pyobjc/Cocoa, the inference is MLX.
-- You have to route audio through BlackHole yourself — see the BlackHole setup above.
-- Whisper is not free. The default turbo chunker keeps up on an M-series Mac; drop to `--whisper small` if it can't, or `--whisper large` when accuracy matters more than headroom. The streaming mode is heavier still.
-- Auto language detection wobbles on mixed-language audio (Spanish news with Catalan inserts will flip-flop). Pin `--source` if you know it.
-- It still hallucinates sometimes. It's Whisper. We mitigate, we don't cure.
-- The Cocoa overlay and audio workers are still intentionally compact, but the text pipeline and translation backends are split out and covered by tests.
+- You have to route audio through BlackHole — see setup above.
+- Whisper is not free. Drop to `--whisper small` if the default turbo can't keep up, or use `--whisper large` when accuracy matters more than headroom. Streaming mode is heavier still.
+- Auto language detection wobbles on mixed-language audio. Pin `--source` if you know it.
+- It still hallucinates sometimes. We mitigate, we don't cure.
+- The Cocoa overlay and audio workers are intentionally compact; the text pipeline and translation backends are split out and covered by tests.
 
 ## Layout
 
 ```
 live_translate_overlay.py   CLI + orchestration + Cocoa overlay/audio workers
 live_translation/           tested text pipeline + translation backends
-LiveTranslate.app           double-clickable bundle (just launches the script via your venv)
+LiveTranslate.app           double-clickable bundle (launches the script via your venv)
 install-app.sh              put the .app in /Applications, detached from the project folder
 setup.sh / Brewfile         install everything
 requirements.txt            direct deps for normal install
@@ -243,10 +200,10 @@ tests/                      fast unit tests for segmentation/cleanup behavior
 ./.venv/bin/python -m pytest
 ```
 
-## License / spirit
+## License
 
-[MIT](LICENSE) — personal hack, take it and do whatever. PRs welcome but I make no promises about keeping this tidy.
+[MIT](LICENSE) — personal hack, take it and do whatever. PRs welcome.
 
 ## Thanks
 
-Thanks to [Alex Ziskind](https://github.com/alexziskind1) for the [benchmark video on the fastest high-quality way to transcribe on a Mac](https://www.youtube.com/watch?v=PxUSE2KwyUQ) (available to channel subscribers). I used the result of that test to choose the MLX Whisper path, which made this pipeline practical.
+Thanks to [Alex Ziskind](https://github.com/alexziskind1) for the [benchmark video on the fastest high-quality way to transcribe on a Mac](https://www.youtube.com/watch?v=PxUSE2KwyUQ). I used that result to choose the MLX Whisper path, which made this pipeline practical.
