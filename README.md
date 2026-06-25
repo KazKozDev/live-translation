@@ -90,23 +90,6 @@ The defaults match the app launcher (lossless chunker, `--whisper turbo`, `--oll
 
 The app is ad-hoc signed (no Apple Developer ID), so on first launch right-click → Open once to get past Gatekeeper. Allow the one-time microphone prompt (that's BlackHole's loopback).
 
-## The toolbar
-
-Two columns (original / translation) and a thin toolbar:
-
-- **Source / Target** — languages. Leave Source on *Auto* for per-sentence detection; pin it if the audio mixes languages.
-- **Compact** — translation only.
-- **Pin** — keep floating above everything (on by default).
-- **A- / A+** — font size.
-- **Color** — text color for readability over the video.
-- **lag: N** — chunks waiting. Climbing and staying up means your machine can't keep pace (try `--whisper small`).
-- 🗑 — wipe both columns, history, and model state.
-- **Save** — export the full session as TXT, PDF, or SRT/VTT subtitles.
-- **History** — sessions auto-save to `~/Library/Application Support/LiveTranslate`.
-- **⚙** — switch Whisper size and Gemma model live.
-
-The window is draggable and resizable.
-
 ## How it works
 
 Chopping audio into fixed 5 s chunks and transcribing each independently is bad — Whisper adds a period per chunk, cuts words at boundaries, and repeats itself. The interesting work is avoiding that:
