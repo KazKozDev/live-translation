@@ -132,7 +132,7 @@ Chopping audio into fixed 5 s chunks and transcribing each independently is bad 
 
 - macOS + Apple silicon only (pyobjc/Cocoa overlay, MLX inference).
 - You must route audio through BlackHole yourself.
-- Whisper isn't free; drop to `--whisper small` if it can't keep up, `--whisper large` for accuracy. Streaming is heavier.
+- Whisper is compute-heavy; drop to `--whisper small` if it can't keep up, `--whisper large` for accuracy. Streaming is heavier still.
 - Auto language detection wobbles on mixed-language audio — pin `--source` if you know it.
 - It still hallucinates sometimes. We mitigate, not cure.
 
