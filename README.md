@@ -1,154 +1,223 @@
 # Live Translation
 
-A macOS app that captures any audio your Mac plays — YouTube, Zoom, Twitch, a foreign livestream — transcribes it, translates it, and shows both the original and the translation on a floating glass overlay, live. Real-time transcription + translation for the whole machine, fully offline.
+A macOS app that captures any audio playing on your Mac — YouTube, Zoom, Twitch, livestreams, or any other app — transcribes it, translates it, and displays the original and translation side by side in a floating glass overlay.
+
+Everything runs locally on Apple silicon. No API keys, accounts, or cloud services are required, and your audio never leaves the Mac.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Live Translation overlay — original on the left, translation on the right" width="700">
 </p>
 
-## TLDR
+## TL;DR
 
+```text
+system audio ──► Whisper ──► local LLM ──► glass overlay
+   BlackHole       MLX        Ollama         PyObjC
 ```
-system audio ──► whisper (speech→text) ──► local LLM (translate) ──► glass overlay
-   (BlackHole)     (mlx: small/med/turbo/large)   (Ollama Gemma 4)       (pyobjc)
-```
 
-MLX Whisper for transcription, Ollama Gemma 4 for translation, Silero VAD to drop silence. The UI is a translucent always-on-top window drawn with pyobjc. No API key, no account, no cloud — the audio never leaves your Mac.
+- MLX Whisper for transcription
+- Gemma 4 through Ollama for translation
+- Silero VAD for speech detection
+- PyObjC for the always-on-top overlay
 
-## Who's this for
+## Who is this for?
 
-- You watch foreign-language media and want live captions + translation instead of waiting for subtitles.
-- You're learning a language and want the original and translation side by side on real speech.
-- You sit in calls/meetings in a language you only half-speak.
-- You need captions and translation for accessibility on audio that has none.
-- You want it fully offline and private.
+- People watching foreign-language media without subtitles
+- Language learners who want original speech and translation side by side
+- Users attending calls or meetings in another language
+- Anyone who needs private, fully offline live captions and translation
 
-## How it's different
+## How it is different
 
-Most "whisper + something" projects are either cloud-based (your audio leaves the machine), transcription-only (no translation, often file-based), OBS/streamer plugins (built for broadcasting), meeting bots (one specific call via an account), or word-by-word MT (choppy output). This combines all of: any app's system audio + a real LLM doing sentence-level translation + a floating overlay + fully local + a deliberate don't-lose-words design.
+Most similar projects are cloud-based, transcription-only, file-based, tied to a meeting platform, or designed for OBS.
+
+Live Translation combines:
+
+- system-wide audio capture;
+- real-time transcription;
+- sentence-level LLM translation;
+- a floating bilingual overlay;
+- local processing;
+- segmentation designed to avoid losing or repeating words.
 
 ## Quickstart
 
-Requires a Mac with Apple silicon. The fast path:
+Requires macOS with Apple silicon.
 
 ```bash
-./setup.sh   # python deps + BlackHole + (optional) ollama + downloads the models
+./setup.sh
 ```
 
-If you'd rather do it by hand:
-
-### 1. Install deps
+Or install manually:
 
 ```bash
-python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
-brew bundle --file=Brewfile   # BlackHole + ffmpeg + ollama
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt
+brew bundle --file=Brewfile
 ```
 
-If installs break in the future, use `requirements.lock.txt` for the exact pinned environment.
+Use `requirements.lock.txt` if you need the exact pinned environment.
 
-### 2. Route system audio through BlackHole
+### Route system audio through BlackHole
 
-macOS won't let an app grab the system output directly, so we use [BlackHole](https://github.com/ExistentialAudio/BlackHole) (a free virtual audio driver, 2ch variant) to loopback output → input. To still hear audio yourself, create a Multi-Output Device:
+macOS does not allow ordinary apps to capture system output directly, so Live Translation uses BlackHole 2ch.
 
-1. Open **Audio MIDI Setup** (`/Applications/Utilities`)
+To keep hearing audio while capturing it:
+
+1. Open Audio MIDI Setup
 2. Click **+** → **Create Multi-Output Device**
-3. Tick both your normal output and *BlackHole 2ch*
-4. Set it as your system output (System Settings → Sound → Output)
+3. Enable your normal output and *BlackHole 2ch*
+4. Select the Multi-Output Device in System Settings → Sound → Output
 
-### 3. Models
+The first launch may request microphone permission. This is required to read BlackHole audio.
 
-Downloaded on first run, or up front by `setup.sh`:
+### Models
 
-- **Whisper medium + turbo** (MLX, from Hugging Face). `small`/`large` download on the fly if selected.
-- **Gemma 4 via Ollama** — pick `gemma4:26b-mlx`, `gemma4:e4b-mlx`, or `gemma4:12b-mlx` in settings.
-- **Silero VAD** ships in the `silero-vad` package — nothing to download.
+#### Whisper
 
-To pre-fetch:
+Supported MLX Whisper models:
+
+- `small` — lowest resource usage
+- `medium` — balanced
+- `turbo` — recommended for live use
+- `large` — highest accuracy
+
+Pre-download the default models:
 
 ```bash
 ./.venv/bin/python -c "from huggingface_hub import snapshot_download; \
-[snapshot_download(r) for r in ('mlx-community/whisper-medium-mlx', 'mlx-community/whisper-large-v3-turbo')]"
-
-for model in gemma4:26b-mlx gemma4:e4b-mlx gemma4:12b-mlx; do ollama pull "$model"; done
+[snapshot_download(r) for r in (
+  'mlx-community/whisper-medium-mlx',
+  'mlx-community/whisper-large-v3-turbo'
+)]"
 ```
 
-### 4. Run
+#### Gemma 4
 
-Double-click `LiveTranslate.app`, or from the terminal:
+Supported Ollama models:
+
+```text
+gemma4:26b-mlx
+gemma4:e4b-mlx
+gemma4:12b-mlx
+```
+
+Download them with:
+
+```bash
+for model in gemma4:26b-mlx gemma4:e4b-mlx gemma4:12b-mlx; do
+    ollama pull "$model"
+done
+```
+
+Recommended preset: **Whisper Turbo + Gemma 4 26B**
+
+### Run
+
+Launch `LiveTranslate.app`, or run:
 
 ```bash
 ./.venv/bin/python live_translate_overlay.py --target ru
 ```
 
-The defaults match the app launcher (lossless chunker, `--whisper turbo`, `--ollama-model gemma4:26b-mlx`). Override anything: `--source es --whisper large --streaming`, etc. Then pick source/target in the overlay's top bar, play audio in any app, and text appears.
-
-### 5. (Optional) install to /Applications
+Example with fixed languages and a different Whisper model:
 
 ```bash
-./install-app.sh            # or: ./install-app.sh ~/Apps
+./.venv/bin/python live_translate_overlay.py \
+    --source es \
+    --target en \
+    --whisper large \
+    --ollama-model gemma4:26b-mlx
 ```
 
-The app is ad-hoc signed (no Apple Developer ID), so on first launch right-click → Open once to get past Gatekeeper. Allow the one-time microphone prompt (that's BlackHole's loopback).
+### Install the app
+
+```bash
+./install-app.sh
+```
+
+Or choose another destination:
+
+```bash
+./install-app.sh ~/Apps
+```
+
+The app is ad-hoc signed. On first launch, right-click it and select **Open**.
 
 ## How it works
 
-Chopping audio into fixed 5 s chunks and transcribing each independently is bad — Whisper adds a period per chunk, cuts words at boundaries, and repeats itself. The interesting work is avoiding that:
+### Lossless segmentation
 
-- **Lossless segmentation (default).** Audio is cut at natural pauses (via VAD), with overlap between chunks. An overlap-dedup merges seams, a sentence assembler regroups on real punctuation, and a spurious-period stripper removes the period Whisper adds on a breath pause. Under normal load the pipeline catches up rather than dropping speech; only under severe overload does it skip stale audio to jump back to live.
+Fixed five-second chunks often make Whisper cut words, repeat phrases, or add false punctuation.
 
-- **Streaming mode (off by default).** A LocalAgreement-2 mode re-transcribes a rolling buffer every ~1.5 s and commits a word once two passes agree (`--show-partial` shows the unconfirmed tail). Reads smoothly but is expensive and lossy under load — hence behind a flag.
+The default pipeline instead:
 
-- **Punctuation-drift guards.** On fast speech Whisper sometimes stops emitting punctuation, and since recent text feeds back as `initial_prompt`, it self-reinforces. Guards: drop the prompt feedback when recent context has no sentence punctuation, and split punctuation-less blocks at clause/word boundaries.
+1. detects speech and pauses with Silero VAD;
+2. creates overlapping speech segments;
+3. removes duplicated text at segment boundaries;
+4. fixes punctuation introduced by artificial pauses;
+5. rebuilds complete sentences;
+6. sends those sentences to the translation model.
 
-- **VAD before Whisper.** Silero VAD filters non-speech so Whisper doesn't hallucinate ("thanks for watching") on silence or music.
+Under normal load, the queue catches up instead of dropping speech. During severe overload, stale audio may be skipped to return to live output.
 
-- **Hallucination blocklist** for the ones that slip through ("gracias", "subtitles by amara.org", etc.).
+### Streaming mode
 
-- **LLM translation, not word-by-word MT.** The LLM gets whole sentences plus recent context, producing coherent output. It runs in the same thread that loaded the model (MLX uses a thread-local GPU stream).
+Enable it with `--streaming`. Streaming re-transcribes a rolling buffer and commits words after two consecutive passes agree. Use `--show-partial` to see the unconfirmed tail and `--update-seconds 1.5` to control re-transcription frequency.
 
-## The models
+It produces smoother partial captions but uses more compute and may lose content under load, so it is disabled by default.
 
-**Transcription: Whisper on MLX** — `small`, `medium`, `turbo`, or `large`. `turbo` is the default (faster large-v3 variant, good live headroom); use `large` when accuracy matters more than latency. MLX runs on the GPU via Metal with unified memory, beating faster-whisper/whisper.cpp on Apple silicon.
+### Hallucination reduction
 
-**Translation: Gemma 4 via Ollama** — switch between three sizes in settings. For best quality: `--whisper turbo` + `--ollama-model gemma4:26b-mlx`.
+Silero VAD removes silence and non-speech before transcription. The pipeline also filters common false outputs such as "thanks for watching", "subtitles by amara.org", and similar phrases. This reduces hallucinations but does not eliminate them completely.
 
-## Knobs
+### Sentence-level translation
 
-```
---source / --target      languages (source=auto detects per-utterance)
---whisper turbo          MLX Whisper size: small, medium, turbo, large
---ollama-model MODEL     Gemma 4 Ollama model
---silence-rms 0.006      louder = stricter silence gate
---vad-min-speech-ms 250  min real speech before whisper sees it
---audio-queue 120        raw audio backlog before old audio is skipped
---show-partial           show the unfinalized live draft
---streaming              LocalAgreement streaming instead of the lossless chunker
---update-seconds 1.5     how often to re-transcribe the rolling buffer
-```
+The LLM receives complete sentences plus recent context, producing more coherent translations than word-by-word machine translation.
 
-`--help` for the full list (~30 flags, most rarely needed).
+## Main options
 
-## Caveats
-
-- macOS + Apple silicon only (pyobjc/Cocoa overlay, MLX inference).
-- You must route audio through BlackHole yourself.
-- Whisper is compute-heavy; drop to `--whisper small` if it can't keep up, `--whisper large` for accuracy. Streaming is heavier still.
-- Auto language detection wobbles on mixed-language audio — pin `--source` if you know it.
-- It still hallucinates sometimes. We mitigate, not cure.
-
-## Layout
-
-```
-live_translate_overlay.py   CLI + orchestration + Cocoa overlay/audio workers
-live_translation/           tested text pipeline + translation backends
-LiveTranslate.app           double-clickable bundle
-install-app.sh              install the .app to /Applications
-setup.sh / Brewfile         install everything
-requirements*.txt           deps (direct / locked / dev)
-tests/                      unit tests for segmentation/cleanup
+```text
+--source LANGUAGE
+--target LANGUAGE
+--whisper MODEL
+--ollama-model MODEL
+--silence-rms VALUE
+--vad-min-speech-ms VALUE
+--audio-queue SIZE
+--show-partial
+--streaming
+--update-seconds VALUE
 ```
 
-## Developer checks
+View all options:
+
+```bash
+./.venv/bin/python live_translate_overlay.py --help
+```
+
+## Limitations
+
+- macOS and Apple silicon only
+- BlackHole setup is required
+- larger models increase latency and memory usage
+- automatic language detection can be unstable with mixed-language audio
+- streaming mode is more compute-demanding
+- Whisper can still hallucinate occasionally
+
+## Project structure
+
+```text
+live_translate_overlay.py   CLI, audio pipeline, and Cocoa overlay
+live_translation/           segmentation, cleanup, and translation
+LiveTranslate.app           macOS app bundle
+install-app.sh              app installer
+setup.sh / Brewfile         setup files
+requirements*.txt           dependencies
+tests/                      unit tests
+```
+
+## Development
 
 ```bash
 ./.venv/bin/pip install -r requirements-dev.txt
@@ -159,8 +228,8 @@ tests/                      unit tests for segmentation/cleanup
 
 ## License
 
-[MIT](LICENSE) — take it and do whatever. PRs welcome, no promises about keeping this tidy.
+[MIT](LICENSE) — use, modify, and redistribute freely.
 
-## Thanks
+## Acknowledgements
 
-Thanks to [Alex Ziskind](https://github.com/alexziskind1) for the [benchmark](https://www.youtube.com/watch?v=PxUSE2KwyUQ) that pointed me at the MLX Whisper path.
+Thanks to [Alex Ziskind](https://github.com/alexziskind1) for the [benchmark](https://www.youtube.com/watch?v=PxUSE2KwyUQ) that pointed to the MLX Whisper path.
