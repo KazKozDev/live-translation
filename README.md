@@ -22,10 +22,11 @@ system audio ──► Whisper ──► local LLM ──► glass overlay
 
 ## Who is this for?
 
-- People watching foreign-language media without subtitles
-- Language learners who want original speech and translation side by side
-- Users attending calls or meetings in another language
-- Anyone who needs private, fully offline live captions and translation
+- You watch foreign-language media — films, series, news, YouTube, Twitch, documentaries — and want live captions + translation instead of waiting for subtitles.
+- You're learning a language and want the original and translation side by side on real speech.
+- You sit in calls/meetings in a language you only half-speak.
+- You need captions and translation for accessibility on audio that has none.
+- You want it fully offline and private.
 
 ## How it is different
 
