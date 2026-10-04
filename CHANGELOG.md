@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **All Whisper languages in the menus**: the From/To pickers now list every language Whisper can transcribe (Japanese, Korean, Arabic, Hindi, …) instead of nine.
+- **Setup preflight**: `setup.sh` checks for Apple silicon, macOS 14+ and Python 3.12+ up front and explains what is missing, instead of failing inside pip.
+
 ## 1.1.0
 
 Faster, smoother transcription and translation — and cleaner text at chunk boundaries.

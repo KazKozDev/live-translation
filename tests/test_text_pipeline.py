@@ -1,6 +1,9 @@
 from live_translation.text_pipeline import (
+    LANG_MENU,
     absolute_words,
     dedup_words_by_time,
+    language_label,
+    language_name,
     last_word_end_seconds,
     merge_overlap_text,
     merge_partial_buffer,
@@ -228,3 +231,17 @@ def test_last_word_end_seconds_reads_nested_whisper_result():
         ]
     }
     assert last_word_end_seconds(result) == 4.0
+
+
+def test_language_tables_cover_whisper_languages():
+    codes = [code for code, _ in LANG_MENU]
+    labels = [label for _, label in LANG_MENU]
+    assert codes[0] == "auto"
+    # Popup items are looked up by title, so labels (and codes) must be unique.
+    assert len(set(codes)) == len(codes)
+    assert len(set(labels)) == len(labels)
+    for code in ("ja", "ko", "ar", "hi"):
+        assert code in codes
+    assert language_label("ja") == "Japanese"
+    assert language_name("ko") == "Korean"
+    assert language_label("xx") == "xx"
