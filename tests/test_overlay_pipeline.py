@@ -1,5 +1,7 @@
 import queue
 
+import pytest
+
 from live_translate_overlay import (
     TRANSLATION_HISTORY_MAX_PAIRS,
     overlap_tail_start,
@@ -78,7 +80,8 @@ def test_translation_history_bounded_by_chars():
 
 
 def test_release_mlx_whisper_model_clears_matching_holder():
-    from mlx_whisper.transcribe import ModelHolder
+    # mlx-whisper is macOS-only; CI runs on Linux without it.
+    ModelHolder = pytest.importorskip("mlx_whisper.transcribe").ModelHolder
 
     previous_model = ModelHolder.model
     previous_path = ModelHolder.model_path
