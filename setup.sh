@@ -4,9 +4,49 @@
 set -e
 cd "$(dirname "$0")"
 
+MIN_MACOS_MAJOR=14
+MIN_PY_MINOR=12   # Python 3.12+
+
+# Preflight: the pinned MLX / PyTorch wheels only exist for Apple silicon on
+# macOS 14+ and Python 3.12+. Fail here with a clear message instead of letting
+# pip die later with "No matching distribution found for mlx".
+if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
+    echo "Error: Live Translation needs a Mac with Apple silicon (found $(uname -s) $(uname -m))." >&2
+    exit 1
+fi
+MACOS_VERSION="$(sw_vers -productVersion)"
+if [ "${MACOS_VERSION%%.*}" -lt "$MIN_MACOS_MAJOR" ]; then
+    echo "Error: macOS $MIN_MACOS_MAJOR (Sonoma) or newer is required — found macOS $MACOS_VERSION." >&2
+    echo "       MLX and PyTorch do not publish wheels for older macOS versions." >&2
+    exit 1
+fi
+
+py_ok() {
+    "$1" -c "import sys; sys.exit(0 if sys.version_info >= (3, $MIN_PY_MINOR) else 1)" >/dev/null 2>&1
+}
+
 echo "==> 1/4  Python venv + pip dependencies"
-if [ ! -d .venv ]; then
-    python3 -m venv .venv
+if [ -d .venv ]; then
+    if ! py_ok ./.venv/bin/python; then
+        echo "Error: existing .venv uses $(./.venv/bin/python --version 2>&1); Python 3.$MIN_PY_MINOR+ is required." >&2
+        echo "       Remove it (rm -rf .venv) and run ./setup.sh again." >&2
+        exit 1
+    fi
+else
+    PYTHON=""
+    for candidate in python3.14 python3.13 python3.12 python3; do
+        if command -v "$candidate" >/dev/null 2>&1 && py_ok "$candidate"; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+    if [ -z "$PYTHON" ]; then
+        echo "Error: Python 3.$MIN_PY_MINOR+ not found (python3 is $(python3 --version 2>&1))." >&2
+        echo "       Install it with: brew install python@3.12" >&2
+        exit 1
+    fi
+    echo "    using $PYTHON ($("$PYTHON" --version 2>&1))"
+    "$PYTHON" -m venv .venv
 fi
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/python -m pip install -r requirements.txt

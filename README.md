@@ -43,7 +43,7 @@ Live Translation combines:
 
 ## Quickstart
 
-Requires macOS with Apple silicon.
+Requires an Apple silicon Mac, macOS 14 (Sonoma) or newer, and Python 3.12+ (`brew install python@3.12`).
 
 ```bash
 git clone https://github.com/KazKozDev/live-translation.git
@@ -54,7 +54,7 @@ cd live-translation
 Or install manually:
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 brew bundle --file=Brewfile
 ```
@@ -201,7 +201,7 @@ View all options:
 
 ## Limitations
 
-- macOS and Apple silicon only
+- Apple silicon and macOS 14+ only — MLX and PyTorch publish no wheels for Intel Macs or older macOS
 - BlackHole setup is required
 - larger models increase latency and memory usage
 - automatic language detection can be unstable with mixed-language audio

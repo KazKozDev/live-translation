@@ -9,9 +9,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>local.artemk.livetranslate</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.2</string>
+	<string>1.1.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.2</string>
+	<string>1.1.0</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>
@@ -19,12 +19,12 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
+	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>LSUIElement</key>
 	<false/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Live Translate слушает микрофон для распознавания и перевода речи.</string>
+	<string>Live Translate listens to audio input to transcribe and translate speech.</string>
 </dict>
 </plist>

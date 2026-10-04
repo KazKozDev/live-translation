@@ -14,7 +14,7 @@ venv/
 live_translate_overlay.boot.log
 
 # Downloaded / quantized models (large, fetched on demand)
-models/
+models
 
 # macOS
 .DS_Store
@@ -38,3 +38,6 @@ coverage.xml
 .vscode/
 .idea/
 *.swp
+
+# Local tooling
+.serena/

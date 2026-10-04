@@ -15,7 +15,7 @@ torchaudio==2.11.0          # used to resample audio to 16 kHz for VAD
 
 # --- Audio capture / IO ---
 sounddevice==0.5.5          # system audio input (e.g. BlackHole loopback)
-soundfile==0.14.0           # write WAV chunks for Whisper
+soundfile==0.14.0           # WAV fallback when in-memory decode fails
 numpy==2.4.6
 
 # --- macOS glass overlay UI ---
